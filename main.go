@@ -11,8 +11,6 @@ import (
 	"sync"
 
 	"github.com/containers/image/v5/copy"
-	"github.com/containers/image/v5/image"
-	"github.com/containers/image/v5/manifest"
 	"github.com/containers/image/v5/signature"
 	"github.com/containers/image/v5/transports/alltransports"
 	"github.com/containers/image/v5/types"
@@ -128,12 +126,16 @@ func onMessage(client MQTT.Client, msg MQTT.Message) {
 func processDownloadQueue() {
 	defer wg.Done()
 	for image := range downloadQueue {
-		log.Printf("Downloading image: %s\n", image)
-		if err := copyImage(image, fmt.Sprintf("%s/%s", *localRegistry, image)); err != nil {
-			log.Printf("Failed to download image: %v\n", err)
-		} else {
-			log.Printf("Successfully downloaded image: %s\n", image)
-		}
+		wg.Add(1)
+		go func(img string) {
+			defer wg.Done()
+			log.Printf("Downloading image: %s\n", img)
+			if err := copyImage(img, fmt.Sprintf("%s/%s", *localRegistry, img)); err != nil {
+				log.Printf("Failed to download image: %v\n", err)
+			} else {
+				log.Printf("Successfully downloaded image: %s\n", img)
+			}
+		}(image)
 	}
 }
 
@@ -178,62 +180,8 @@ func copyImage(srcImage, destImage string) error {
 		return fmt.Errorf("failed to create policy context: %v", err)
 	}
 
-	// Fetch the source image's manifest
-	srcImageSource, err := srcRef.NewImageSource(ctx, &types.SystemContext{})
-	if err != nil {
-		return fmt.Errorf("failed to create source image source: %v", err)
-	}
-	defer srcImageSource.Close()
-
-	manifestBytes, manifestType, err := srcImageSource.GetManifest(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to fetch manifest: %v", err)
-	}
-
-	// Check if the manifest is a multi-arch manifest list
-	if manifest.MIMETypeIsMultiArch(manifestType) {
-		// Parse the manifest list
-		manifestList, err := manifest.ListFromBlob(manifestBytes, manifestType)
-		if err != nil {
-			return fmt.Errorf("failed to parse manifest list: %v", err)
-		}
-
-		// Iterate through each manifest in the list
-		for _, instance := range manifestList.Instances() {
-			// Fetch the manifest for the specific architecture
-			instanceManifestBytes, _, err := srcImageSource.GetManifest(ctx, &instance)
-			if err != nil {
-				log.Printf("Failed to fetch manifest for instance %s: %v\n", instance, err)
-				continue
-			}
-
-			// Copy the image for the specific architecture
-			if err := copyImageInstance(ctx, policyContext, srcRef, destRef, instanceManifestBytes); err != nil {
-				log.Printf("Failed to copy instance %s: %v\n", instance, err)
-			} else {
-				log.Printf("Successfully copied instance %s\n", instance)
-			}
-		}
-	} else {
-		// Copy the single-arch image
-		if err := copyImageInstance(ctx, policyContext, srcRef, destRef, manifestBytes); err != nil {
-			return fmt.Errorf("failed to copy image: %v", err)
-		}
-	}
-
-	return nil
-}
-
-// Copy a single instance of an image
-func copyImageInstance(ctx context.Context, policyContext *signature.PolicyContext, srcRef, destRef types.ImageReference, manifestBytes []byte) error {
-	// Create a new image from the manifest
-	srcImage, err := image.FromManifest(ctx, srcRef, manifestBytes)
-	if err != nil {
-		return fmt.Errorf("failed to create source image: %v", err)
-	}
-
 	// Copy the image
-	_, err = copy.Image(ctx, policyContext, destRef, srcImage, &copy.Options{
+	_, err = copy.Image(ctx, policyContext, destRef, srcRef, &copy.Options{
 		ReportWriter: log.Writer(),
 	})
 	if err != nil {
