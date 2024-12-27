@@ -85,8 +85,11 @@ jobs:
       # Set up kind cluster using the kind-cluster action
       - name: Create kind cluster
         uses: helm/kind-action@v1.12.0
-        # with:
-        #   config: kind-config.yaml
+        with:
+          registry: true
+          registry_name: my-registry
+          registry_port: 5000
+          registry_enable_delete: true
 
 
       # # Install mosquitto (MQTT broker)
