@@ -41,6 +41,7 @@ type ImageRequest struct {
 var (
 	downloadQueue = make(chan string, 100) // Buffered channel to queue downloads
 	wg            sync.WaitGroup           // WaitGroup to track background goroutines
+	mqttClient    MQTT.Client              // Global MQTT client
 )
 
 func main() {
@@ -80,16 +81,16 @@ func main() {
 func startMQTTMirroring() {
 	// Set up MQTT client options
 	opts := MQTT.NewClientOptions().AddBroker(*mqttBroker)
-	client := MQTT.NewClient(opts)
+	mqttClient = MQTT.NewClient(opts)
 
 	// Connect to the MQTT broker
-	if token := client.Connect(); token.Wait() && token.Error() != nil {
+	if token := mqttClient.Connect(); token.Wait() && token.Error() != nil {
 		log.Fatalf("Failed to connect to MQTT broker: %v", token.Error())
 	}
 	log.Println("Connected to MQTT broker")
 
 	// Subscribe to the MQTT topic
-	if token := client.Subscribe(*mqttTopic, 0, onMessage); token.Wait() && token.Error() != nil {
+	if token := mqttClient.Subscribe(*mqttTopic, 0, onMessage); token.Wait() && token.Error() != nil {
 		log.Fatalf("Failed to subscribe to topic: %v", token.Error())
 	}
 	log.Printf("Subscribed to topic: %s\n", *mqttTopic)
