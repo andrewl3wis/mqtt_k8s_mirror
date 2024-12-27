@@ -1,0 +1,132 @@
+name: Test Go Program with kind and MQTT
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Check out the repository
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      # Set up Go
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+
+      # Install dependencies
+      - name: Install dependencies
+        run: |
+          go install github.com/containers/image/v5/copy@latest
+          go install github.com/eclipse/paho.mqtt.golang@latest
+
+      # Run unit tests
+      - name: Run unit tests
+        run: |
+          go test -v ./...
+
+      # Install kind
+      - name: Install kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+      # Create a kind cluster
+      - name: Create kind cluster
+        run: |
+          kind create cluster --name test-cluster --config=- <<EOF
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          nodes:
+            - role: control-plane
+              extraPortMappings:
+                - containerPort: 8443
+                  hostPort: 8443
+          EOF
+
+      # Install mosquitto (MQTT broker)
+      - name: Install mosquitto
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mosquitto
+
+      # Start mosquitto (MQTT broker)
+      - name: Start mosquitto
+        run: |
+          mosquitto -p 1883 &
+          MOSQUITTO_PID=$!
+          echo "Mosquitto started with PID $MOSQUITTO_PID"
+
+      # Build the Go binary
+      - name: Build Go binary
+        run: |
+          go build -o combined_mirror
+
+      # Generate self-signed TLS certificates
+      - name: Generate TLS certificates
+        run: |
+          openssl req -x509 -newkey rsa:4096 -keyout server.key -out server.crt -days 365 -nodes -subj "/CN=localhost"
+
+      # Deploy the program and test it
+      - name: Deploy and test
+        run: |
+          # Start the program in the background
+          ./combined_mirror --webhook --mirror --mqtt-broker tcp://localhost:1883 --webhook-port 8443 &
+          PROGRAM_PID=$!
+
+          # Wait for the program to start
+          sleep 5
+
+          # Create a MutatingWebhookConfiguration
+          kubectl apply -f - <<EOF
+          apiVersion: admissionregistration.k8s.io/v1
+          kind: MutatingWebhookConfiguration
+          metadata:
+            name: webhook-mirroring
+          webhooks:
+            - name: webhook.mirroring.example.com
+              admissionReviewVersions: ["v1"]
+              sideEffects: None
+              rules:
+                - operations: ["CREATE"]
+                  apiGroups: [""]
+                  apiVersions: ["v1"]
+                  resources: ["pods"]
+              clientConfig:
+                url: "https://localhost:8443/webhook"
+              failurePolicy: Fail
+          EOF
+
+          # Create a pod with the webhook annotation
+          kubectl apply -f - <<EOF
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: webhook-test-pod
+            annotations:
+              webhook: "true"
+          spec:
+            containers:
+              - name: nginx
+                image: quay.io/nginx:green
+          EOF
+
+          # Wait for the pod to be created
+          sleep 10
+
+          # Check the logs of the program
+          cat combined_mirror.log
+
+          # Clean up
+          kill $PROGRAM_PID
+          kill $MOSQUITTO_PID
