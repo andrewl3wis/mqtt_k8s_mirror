@@ -22,6 +22,18 @@ jobs:
         uses: actions/setup-go@v4
         with:
           go-version: '1.23'  # Use Go 1.22.10 or later
+      
+      # Cache Go modules
+      - name: Cache Go modules
+        id: go-mod-cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
 
       # Install system dependencies
       - name: Install system dependencies
@@ -31,7 +43,8 @@ jobs:
             libgpgme-dev \
             btrfs-progs \
             libbtrfs-dev \
-            pkg-config
+            pkg-config \
+            mosquitto
 
       # Initialize Go module
       - name: Initialize Go module
@@ -76,10 +89,10 @@ jobs:
         #   config: kind-config.yaml
 
 
-      # Install mosquitto (MQTT broker)
-      - name: Install mosquitto
-        run: |
-          sudo apt-get install -y mosquitto
+      # # Install mosquitto (MQTT broker)
+      # - name: Install mosquitto
+      #   run: |
+      #     sudo apt-get install -y mosquitto
 
       # Start mosquitto (MQTT broker)
       - name: Start mosquitto
