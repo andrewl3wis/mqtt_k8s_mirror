@@ -53,27 +53,27 @@ jobs:
       # Generate self-signed TLS certificates
       - name: Generate TLS certificates
         run: |
-          openssl req -x509 -newkey rsa:4096 -keyout server.key -out server.crt -days 365 -nodes -subj "/CN=localhost"
+          openssl req -x509 -newkey rsa:4096 -keyout server.key -out server.crt -days 365 -nodes -subj "/CN=host.docker.internal"
 
-      # Write the custom Kind configuration file
-      - name: Write Kind configuration
-        run: |
-          cat <<EOF > kind-config.yaml
-          kind: Cluster
-          apiVersion: kind.x-k8s.io/v1alpha4
-          nodes:
-          - role: control-plane
-            extraPortMappings:
-            - containerPort: 8443
-              hostPort: 8443
-              protocol: TCP
-          EOF
+      # # Write the custom Kind configuration file
+      # - name: Write Kind configuration
+      #   run: |
+      #     cat <<EOF > kind-config.yaml
+      #     kind: Cluster
+      #     apiVersion: kind.x-k8s.io/v1alpha4
+      #     nodes:
+      #     - role: control-plane
+      #       extraPortMappings:
+      #       - containerPort: 8443
+      #         hostPort: 8443
+      #         protocol: TCP
+      #     EOF
 
       # Set up kind cluster using the kind-cluster action
       - name: Create kind cluster
         uses: helm/kind-action@v1.12.0
-        with:
-          config: kind-config.yaml
+        # with:
+        #   config: kind-config.yaml
 
 
       # Install mosquitto (MQTT broker)
@@ -114,7 +114,7 @@ jobs:
                   apiVersions: ["v1"]
                   resources: ["pods"]
               clientConfig:
-                url: "https://localhost:8443/webhook"
+                url: "https://host.docker.internal:8443/webhook"
               failurePolicy: Fail
           EOF
 
@@ -129,7 +129,7 @@ jobs:
           spec:
             containers:
               - name: nginx
-                image: quay.io/nginx:green
+                image: nginx
           EOF
 
           # Wait for the pod to be created
