@@ -28,11 +28,12 @@ jobs:
         run: |
           go mod init your-repo
 
-      # Add dependencies
+      # Add dependencies and tidy
       - name: Add dependencies
         run: |
           go get github.com/containers/image/v5/copy
           go get github.com/eclipse/paho.mqtt.golang
+          go mod tidy
 
       # Run unit tests
       - name: Run unit tests
