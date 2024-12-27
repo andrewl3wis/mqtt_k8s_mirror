@@ -55,9 +55,25 @@ jobs:
         run: |
           openssl req -x509 -newkey rsa:4096 -keyout server.key -out server.crt -days 365 -nodes -subj "/CN=localhost"
 
-            # Set up kind cluster using the kind-cluster action
+      # Write the custom Kind configuration file
+      - name: Write Kind configuration
+        run: |
+          cat <<EOF > kind-config.yaml
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          nodes:
+          - role: control-plane
+            extraPortMappings:
+            - containerPort: 8443
+              hostPort: 8443
+              protocol: TCP
+          EOF
+
+      # Set up kind cluster using the kind-cluster action
       - name: Create kind cluster
-        uses: helm/kind-action@v1.12.0  # This is the same as the kind-cluster action
+        uses: helm/kind-action@v1.12.0
+        with:
+          config: kind-config.yaml
 
 
       # Install mosquitto (MQTT broker)
