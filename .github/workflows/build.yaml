@@ -30,12 +30,13 @@ jobs:
           sudo apt-get install -y \
             libgpgme-dev \
             btrfs-progs \
+            libbtrfs-dev \
             pkg-config
 
       # Initialize Go module
       - name: Initialize Go module
         run: |
-          go mod init your-repo
+          go mod init mqtt_mirror
 
       # Add dependencies and tidy
       - name: Add dependencies
@@ -44,10 +45,10 @@ jobs:
           go get github.com/eclipse/paho.mqtt.golang
           go mod tidy
 
-      # # Run unit tests
-      # - name: Run unit tests
-      #   run: |
-      #     go test -v ./...
+      # Run unit tests
+      - name: Run unit tests
+        run: |
+          go test -v ./...
 
       # Install kind
       - name: Install kind
