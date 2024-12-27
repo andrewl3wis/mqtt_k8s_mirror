@@ -23,11 +23,16 @@ jobs:
         with:
           go-version: '1.21'
 
-      # Install dependencies
-      - name: Install dependencies
+      # Initialize Go module
+      - name: Initialize Go module
         run: |
-          go install github.com/containers/image/v5/copy@latest
-          go install github.com/eclipse/paho.mqtt.golang@latest
+          go mod init your-repo
+
+      # Add dependencies
+      - name: Add dependencies
+        run: |
+          go get github.com/containers/image/v5/copy
+          go get github.com/eclipse/paho.mqtt.golang
 
       # Run unit tests
       - name: Run unit tests
