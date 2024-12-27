@@ -107,7 +107,8 @@ jobs:
           # Start the program in the background
           ./combined_mirror --webhook --mirror --mqtt-broker tcp://localhost:1883 --webhook-port 8443 &
           PROGRAM_PID=$!
-
+          
+          CA_BUNDLE=$(cat server.crt | base64 | tr -d '\n')
           # Wait for the program to start
           sleep 5
 
@@ -128,6 +129,7 @@ jobs:
                   resources: ["pods"]
               clientConfig:
                 url: "https://172.18.0.1:8443/webhook"
+                caBundle: $CA_BUNDLE
               failurePolicy: Fail
           EOF
 
