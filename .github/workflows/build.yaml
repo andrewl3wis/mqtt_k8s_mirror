@@ -21,7 +21,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
-          go-version: '1.22.10'  # Use Go 1.22.10 or later
+          go-version: '1.23'  # Use Go 1.22.10 or later
 
       # Install system dependencies
       - name: Install system dependencies
@@ -45,7 +45,17 @@ jobs:
           go get github.com/eclipse/paho.mqtt.golang
           go mod tidy
 
-      # Set up kind cluster using the kind-cluster action
+      # Build the Go binary
+      - name: Build Go binary
+        run: |
+          go build -o combined_mirror
+
+      # Generate self-signed TLS certificates
+      - name: Generate TLS certificates
+        run: |
+          openssl req -x509 -newkey rsa:4096 -keyout server.key -out server.crt -days 365 -nodes -subj "/CN=localhost"
+
+            # Set up kind cluster using the kind-cluster action
       - name: Create kind cluster
         uses: helm/kind-action@v1.12.0  # This is the same as the kind-cluster action
 
@@ -61,16 +71,6 @@ jobs:
           mosquitto -p 1883 &
           MOSQUITTO_PID=$!
           echo "Mosquitto started with PID $MOSQUITTO_PID"
-
-      # Build the Go binary
-      - name: Build Go binary
-        run: |
-          go build -o combined_mirror
-
-      # Generate self-signed TLS certificates
-      - name: Generate TLS certificates
-        run: |
-          openssl req -x509 -newkey rsa:4096 -keyout server.key -out server.crt -days 365 -nodes -subj "/CN=localhost"
 
       # Deploy the program and test it
       - name: Deploy and test
