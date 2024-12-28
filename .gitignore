@@ -37,6 +37,10 @@ Thumbs.db
 *.key
 *.pem
 *.log
+test.db*
+output.tar
+kind
+kubectl
 
 # Dependency directories
 vendor/
