@@ -53,10 +53,19 @@ jobs:
           go get github.com/eclipse/paho.mqtt.golang
           go mod tidy
 
-      # Build the Go binary
-      - name: Build Go binary
+      # Build the Go binaries for multiple architectures
+      - name: Build Go binaries
         run: |
-          go build -o combined_mirror
+          # Build for AMD64
+          GOARCH=amd64 go build -o combined_mirror-amd64
+          echo "Built AMD64 binary: combined_mirror-amd64"
+          
+          # Build for ARM64
+          GOARCH=arm64 go build -o combined_mirror-arm64
+          echo "Built ARM64 binary: combined_mirror-arm64"
+          
+          # Create a symbolic link to amd64 version as default for testing
+          ln -s combined_mirror-amd64 combined_mirror
 
       # Generate self-signed TLS certificates
       - name: Generate TLS certificates
@@ -71,20 +80,6 @@ jobs:
             -addext "subjectAltName=IP:172.17.0.1"
           chmod 600 server.key server.crt
 
-      # # Write the custom Kind configuration file
-      # - name: Write Kind configuration
-      #   run: |
-      #     cat <<EOF > kind-config.yaml
-      #     kind: Cluster
-      #     apiVersion: kind.x-k8s.io/v1alpha4
-      #     nodes:
-      #     - role: control-plane
-      #       extraPortMappings:
-      #       - containerPort: 8443
-      #         hostPort: 8443
-      #         protocol: TCP
-      #     EOF
-
       # Set up kind cluster using the kind-cluster action
       - name: Create kind cluster
         uses: helm/kind-action@v1.12.0
@@ -94,18 +89,6 @@ jobs:
           registry_port: 5000
           registry_enable_delete: true
 
-
-      # # Install mosquitto (MQTT broker)
-      # - name: Install mosquitto
-      #   run: |
-      #     sudo apt-get install -y mosquitto
-
-      # Start mosquitto (MQTT broker)
-      # - name: Start mosquitto
-      #   run: |
-      #     mosquitto -p 1883 &
-      #     MOSQUITTO_PID=$!
-      #     echo "Mosquitto started with PID $MOSQUITTO_PID"
 
       # Deploy the program and test it
       - name: Deploy and test
@@ -176,6 +159,5 @@ jobs:
             exit 1
           fi
 
-          # Clean up
-          kill $PROGRAM_PID
-          kill $MOSQUITTO_PID
+          # # Clean up
+          # kill $PROGRAM_PID
