@@ -91,7 +91,7 @@ jobs:
           # Create log file
           touch kube-mqtt-mirror.log
 
-          # Start the program with debug logging
+          # Start the program
           ./kube-mqtt-mirror \
             -webhook \
             -mirror \
@@ -102,8 +102,7 @@ jobs:
             -insecure-registries \
             -tls-cert server.crt \
             -tls-key server.key \
-            -log-file kube-mqtt-mirror.log \
-            -v=4 &
+            -log-file kube-mqtt-mirror.log &
           MIRROR_PID=$!
 
           # Show program output in real time
