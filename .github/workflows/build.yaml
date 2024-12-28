@@ -46,11 +46,6 @@ jobs:
             pkg-config \
             mosquitto
 
-      # Initialize Go module
-      - name: Initialize Go module
-        run: |
-          go mod init mqtt_k8s_mirror
-
       # Add dependencies and tidy
       - name: Add dependencies
         run: |
