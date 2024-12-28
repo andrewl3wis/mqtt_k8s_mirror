@@ -110,7 +110,7 @@ jobs:
       - name: Make binaries executable and verify
         run: |
           # Make binaries executable
-          chmod +x kube-mqtt-mirror-amd64 kube-mqtt-mirror-arm64
+          chmod +x kube-mqtt-mirror-amd64 
           ln -s kube-mqtt-mirror-amd64 kube-mqtt-mirror
 
           # Verify binary architectures
