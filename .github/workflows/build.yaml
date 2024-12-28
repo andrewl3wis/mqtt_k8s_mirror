@@ -98,8 +98,20 @@ jobs:
       # Install system dependencies for ARM64
       - name: Install system dependencies
         run: |
+          # Add ARM64 architecture
           sudo dpkg --add-architecture arm64
+          
+          # Configure apt for multi-arch
+          sudo tee /etc/apt/sources.list.d/arm64.list > /dev/null <<EOF
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy main restricted
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-security main restricted
+          EOF
+          
+          # Update package lists
           sudo apt-get update
+          
+          # Install cross-compilation tools and ARM64 libraries
           sudo apt-get install -y \
             libgpgme-dev:arm64 \
             libbtrfs-dev:arm64 \
