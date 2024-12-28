@@ -36,51 +36,81 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-amd64-
 
-      # Install system dependencies for AMD64
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libgpgme-dev \
-            btrfs-progs \
-            libbtrfs-dev \
-            pkg-config
+      # Set up Docker Buildx
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      # Verify and download dependencies
-      - name: Verify dependencies
-        run: |
-          echo "=== Go Module Information ==="
-          go version
-          go mod verify
-          go mod graph
-          go mod download -json
-          go list -m all
+      # Set up Docker cache
+      - name: Set up Docker cache
+        uses: actions/cache@v3
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-amd64-${{ hashFiles('**/go.mod', '**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-amd64-
 
-      # Build the Go binary for AMD64
+      # Build AMD64 binary in Docker
       - name: Build AMD64 binary
         run: |
-          # Set environment variables
-          export GOTOOLCHAIN=local
-          export CGO_ENABLED=1
-          export GOARCH=amd64
-          export GO111MODULE=on
+          # Create builder instance with cache
+          docker buildx create --use --name amd64-builder
 
-          # Show build environment
-          echo "=== Go Environment ==="
-          go env
+          # Create Dockerfile for AMD64 build
+          cat > Dockerfile.amd64 <<EOF
+          # Dependency stage
+          FROM golang:1.23.4-bookworm AS deps
           
-          # Build with detailed logging
-          go build -v -x -o kube-mqtt-mirror-amd64 2>&1 | tee build.log
+          # Cache apt packages
+          RUN rm -f /etc/apt/apt.conf.d/docker-clean && \
+              echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache
           
-          # Show binary info
-          echo "=== AMD64 Binary Info ==="
-          file kube-mqtt-mirror-amd64
-          echo "=== Dependencies ==="
-          ldd kube-mqtt-mirror-amd64
-          echo "=== Library Files ==="
-          ldd kube-mqtt-mirror-amd64 | grep "=> /" | awk '{print $3}' | xargs ls -l
+          # Install build dependencies with cache
+          RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+              --mount=type=cache,target=/var/lib/apt,sharing=locked \
+              apt-get update && apt-get install -y \
+              libgpgme-dev \
+              libbtrfs-dev \
+              pkg-config \
+              file
+
+          # Cache Go modules
+          WORKDIR /go/src/app
+          COPY go.mod go.sum ./
+          RUN --mount=type=cache,target=/go/pkg/mod \
+              go mod download
+
+          # Build stage
+          FROM deps AS builder
+          WORKDIR /go/src/app
           
-          # Create a symbolic link to amd64 version as default for testing
+          COPY . .
+
+          # Build the binary with detailed logging
+          ENV GOTOOLCHAIN=local
+          ENV CGO_ENABLED=1
+          ENV GOARCH=amd64
+          ENV GO111MODULE=on
+          RUN go build -v -o kube-mqtt-mirror-amd64 && \
+              echo "=== Binary Info ===" && \
+              file kube-mqtt-mirror-amd64 && \
+              echo "=== Dependencies ===" && \
+              ldd kube-mqtt-mirror-amd64
+          EOF
+
+          # Build using buildx with enhanced caching
+          docker buildx build \
+            --cache-from=type=local,src=/tmp/.buildx-cache \
+            --cache-to=type=local,dest=/tmp/.buildx-cache-new,mode=max \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            --output type=local,dest=. \
+            --progress=plain \
+            -f Dockerfile.amd64 .
+
+          # Move cache to prevent cache growth
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+          # Create symbolic link for testing
           ln -s kube-mqtt-mirror-amd64 kube-mqtt-mirror
 
       # Upload AMD64 binary as artifact
@@ -119,27 +149,31 @@ jobs:
           docker buildx create --use --name arm64-builder
           # Create Dockerfile for ARM64 build with multi-stage build
           cat > Dockerfile.arm64 <<EOF
-          # Build stage
-          FROM --platform=linux/arm64 golang:1.23.4-bookworm AS builder
-
-          # Install build dependencies
-          RUN apt-get update && apt-get install -y \
+          # Dependency stage
+          FROM --platform=linux/arm64 golang:1.23.4-bookworm AS deps
+          
+          # Cache apt packages
+          RUN rm -f /etc/apt/apt.conf.d/docker-clean && \
+              echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache
+          
+          # Install build dependencies with cache
+          RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+              --mount=type=cache,target=/var/lib/apt,sharing=locked \
+              apt-get update && apt-get install -y \
               libgpgme-dev \
               libbtrfs-dev \
               pkg-config \
               file
 
-          WORKDIR /build
+          # Cache Go modules
+          WORKDIR /go/src/app
           COPY go.mod go.sum ./
-          
-          # Verify and download dependencies
-          RUN echo "=== Go Module Information ===" && \
-              go version && \
-              go mod verify && \
-              go mod graph && \
-              go mod download -json && \
-              go list -m all
+          RUN --mount=type=cache,target=/go/pkg/mod \
+              go mod download
 
+          # Build stage
+          FROM deps AS builder
+          WORKDIR /go/src/app
           COPY . .
 
           # Verify Go environment
@@ -200,12 +234,14 @@ jobs:
               ls -l /usr/lib/aarch64-linux-gnu/libbtrfs.so*
           EOF
 
-          # Build using buildx with caching
+          # Build using buildx with enhanced caching
           docker buildx build \
             --platform=linux/arm64 \
             --cache-from=type=local,src=/tmp/.buildx-cache \
             --cache-to=type=local,dest=/tmp/.buildx-cache-new,mode=max \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
             --output type=local,dest=. \
+            --progress=plain \
             -f Dockerfile.arm64 .
 
           # Move cache to prevent cache growth
