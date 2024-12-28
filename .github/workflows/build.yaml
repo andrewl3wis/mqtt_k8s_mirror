@@ -66,7 +66,7 @@ jobs:
       # Generate self-signed TLS certificates
       - name: Generate TLS certificates
         run: |
-          openssl req -x509 -newkey rsa:4096 -keyout server.key -out server.crt -days 365 -nodes -subj "/CN=172.17.0.1"
+          openssl req -x509 -newkey rsa:2048 -keyout server.key -out server.crt -days 365 -nodes -subj "/CN=host.docker.internal" -addext "subjectAltName=IP:172.17.0.1"
 
       # # Write the custom Kind configuration file
       # - name: Write Kind configuration
