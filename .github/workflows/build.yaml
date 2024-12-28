@@ -71,79 +71,45 @@ jobs:
 
   arm64-build:
     runs-on: ubuntu-22.04
-
     steps:
-      # Check out the repository
       - name: Checkout code
         uses: actions/checkout@v3
 
-      # Set up Go
-      - name: Set up Go
-        uses: actions/setup-go@v4
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
         with:
-          go-version: '1.22'
-      
-      # Cache Go modules
-      - name: Cache Go modules
-        id: go-mod-cache
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: ${{ runner.os }}-go-arm64-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-arm64-
+          platforms: arm64
 
-      # Install system dependencies for ARM64
-      - name: Install system dependencies
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build ARM64 binary in Docker
         run: |
-          # Add ARM64 architecture
-          sudo dpkg --add-architecture arm64
-          
-          # Configure apt for multi-arch
-          sudo tee /etc/apt/sources.list.d/arm64.list > /dev/null <<EOF
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy main restricted
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-security main restricted
+          # Create Dockerfile for ARM64 build
+          cat > Dockerfile.arm64 <<EOF
+          FROM --platform=linux/arm64 golang:1.22-bookworm
+
+          # Install build dependencies
+          RUN apt-get update && apt-get install -y \
+              libgpgme-dev \
+              libbtrfs-dev \
+              pkg-config
+
+          WORKDIR /build
+          COPY . .
+
+          # Build the binary
+          RUN go get github.com/containers/image/v5/copy && \
+              go get github.com/eclipse/paho.mqtt.golang && \
+              go mod tidy && \
+              CGO_ENABLED=1 GOARCH=arm64 go build -v -o kube-mqtt-mirror-arm64
           EOF
-          
-          # Update package lists
-          sudo apt-get update
-          
-          # Install cross-compilation tools and ARM64 libraries
-          sudo apt-get install -y \
-            libgpgme-dev:arm64 \
-            libbtrfs-dev:arm64 \
-            pkg-config \
-            gpgme-config:arm64 \
-            gcc-aarch64-linux-gnu
 
-          # Ensure pkg-config can find ARM64 gpgme
-          sudo cp /usr/lib/aarch64-linux-gnu/pkgconfig/gpgme*.pc /usr/lib/pkgconfig/ || true
+          # Build using buildx
+          docker buildx build --platform linux/arm64 \
+            --output type=local,dest=. \
+            -f Dockerfile.arm64 .
 
-      # Add dependencies and tidy
-      - name: Add dependencies
-        run: |
-          go get github.com/containers/image/v5/copy
-          go get github.com/eclipse/paho.mqtt.golang
-          go mod tidy
-
-      # Build the Go binary for ARM64
-      - name: Build ARM64 binary
-        run: |
-          # Debug output
-          echo "=== Checking pkg-config and library paths ==="
-          echo "ARM64 pkg-config for gpgme:"
-          PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig pkg-config --libs --cflags gpgme || true
-          echo "Available .pc files:"
-          find /usr -name "gpgme*.pc" || true
-          
-          # Build for ARM64 with proper CGO settings
-          CGO_ENABLED=1 GOARCH=arm64 CC=aarch64-linux-gnu-gcc PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig go build -v -x -o kube-mqtt-mirror-arm64
-          echo "Built ARM64 binary: kube-mqtt-mirror-arm64"
-
-      # Upload ARM64 binary as artifact
       - name: Upload ARM64 binary
         uses: actions/upload-artifact@v3
         with:
@@ -151,7 +117,7 @@ jobs:
           path: kube-mqtt-mirror-arm64
 
   test:
-    needs: [amd64-build]
+    needs: [amd64-build, arm64-build]
     runs-on: ubuntu-22.04
 
     steps:
@@ -159,17 +125,30 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      # Download AMD64 binary
+      # Download binaries
       - name: Download AMD64 binary
         uses: actions/download-artifact@v3
         with:
           name: kube-mqtt-mirror-amd64
 
-      # Make binary executable
-      - name: Make binary executable
+      - name: Download ARM64 binary
+        uses: actions/download-artifact@v3
+        with:
+          name: kube-mqtt-mirror-arm64
+
+      # Make binaries executable and verify
+      - name: Make binaries executable and verify
         run: |
-          chmod +x kube-mqtt-mirror-amd64
+          # Make binaries executable
+          chmod +x kube-mqtt-mirror-amd64 kube-mqtt-mirror-arm64
           ln -s kube-mqtt-mirror-amd64 kube-mqtt-mirror
+
+          # Verify binary architectures
+          echo "=== AMD64 Binary Info ==="
+          file kube-mqtt-mirror-amd64
+          
+          echo "=== ARM64 Binary Info ==="
+          file kube-mqtt-mirror-arm64
 
       # Install minimal runtime dependencies
       - name: Install system dependencies
