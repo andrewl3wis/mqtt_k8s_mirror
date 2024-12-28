@@ -32,6 +32,8 @@ type Config struct {
 	EnableMirror       bool
 	MQTTBroker         string
 	MQTTTopic          string
+	MQTTUsername       string
+	MQTTPassword       string
 	LocalRegistry      string
 	WebhookPort        string
 	InsecureRegistries bool
@@ -105,6 +107,8 @@ func parseFlags() Config {
 	flag.BoolVar(&config.EnableMirror, "mirror", false, "Enable MQTT-based image mirroring")
 	flag.StringVar(&config.MQTTBroker, "mqtt-broker", "tcp://mqtt.broker.address:1883", "MQTT broker address")
 	flag.StringVar(&config.MQTTTopic, "mqtt-topic", "image/download", "MQTT topic for image download requests")
+	flag.StringVar(&config.MQTTUsername, "mqtt-username", "", "MQTT username (optional)")
+	flag.StringVar(&config.MQTTPassword, "mqtt-password", "", "MQTT password (optional)")
 	flag.StringVar(&config.LocalRegistry, "local-registry", "localhost:5000", "Local Docker registry address")
 	flag.StringVar(&config.WebhookPort, "webhook-port", "8443", "Port to listen for webhook calls")
 	flag.BoolVar(&config.InsecureRegistries, "insecure-registries", false, "Allow connections to insecure registries (HTTP)")
@@ -188,6 +192,15 @@ func (app *AppContext) startMQTTMirroring(ctx context.Context) error {
 		SetOnConnectHandler(func(client MQTT.Client) {
 			app.logger.Println("Connected to MQTT broker")
 		})
+
+	// Add authentication if credentials are provided
+	if app.config.MQTTUsername != "" {
+		opts.SetUsername(app.config.MQTTUsername)
+		if app.config.MQTTPassword != "" {
+			opts.SetPassword(app.config.MQTTPassword)
+		}
+		app.logger.Println("Using MQTT authentication")
+	}
 
 	app.mqttClient = MQTT.NewClient(opts)
 

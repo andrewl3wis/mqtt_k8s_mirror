@@ -27,7 +27,6 @@ check_command() {
 echo "Checking prerequisites..."
 check_command "docker"
 check_command "act"
-check_command "gh"
 
 # Check Docker is running
 if ! docker info &> /dev/null; then
@@ -36,11 +35,10 @@ if ! docker info &> /dev/null; then
     exit 1
 fi
 
-# Check GitHub CLI authentication
-if ! gh auth status &> /dev/null; then
-    echo "Error: GitHub CLI is not authenticated"
-    echo "Please run 'gh auth login' first"
-    exit 1
+# Check GitHub CLI authentication (optional)
+GH_TOKEN=""
+if command -v gh &> /dev/null && gh auth status &> /dev/null; then
+    GH_TOKEN="$(gh auth token)"
 fi
 
 # Show usage
@@ -99,7 +97,8 @@ echo "This will execute the selected job using act..."
 act -j "$JOB" \
     -P ubuntu-latest=nektos/act-environments-ubuntu:18.04 \
     --bind \
-    -s GITHUB_TOKEN="$(gh auth token)" \
+    ${GH_TOKEN:+-s GITHUB_TOKEN="$GH_TOKEN"} \
+    -s ACTIONS_RUNTIME_TOKEN="$(openssl rand -hex 16)" \
     --artifact-server-path /tmp/artifacts \
     $VERBOSE
 
