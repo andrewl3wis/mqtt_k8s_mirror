@@ -49,6 +49,6 @@ ENV GOTOOLCHAIN=local
 ENV CGO_ENABLED=1
 ENV GOARCH=arm64
 ENV GO111MODULE=on
-RUN go build -v -tags musl,netgo,osusergo,sqlite_omit_load_extension -ldflags='-linkmode external -extldflags "-static -L/usr/lib/aarch64-linux-gnu -lgpgme -lassuan -lgpg-error" -X github.com/mattn/go-sqlite3.libVersion=3' -o kube-mqtt-mirror-arm64 && \
+RUN go build -v -tags musl,netgo,osusergo,sqlite_omit_load_extension,containers_image_openpgp,exclude_graphdriver_devicemapper,exclude_graphdriver_btrfs,containers_image_ostree_stub,no_pkcs11 -ldflags='-linkmode external -extldflags "-static -L/usr/lib/aarch64-linux-gnu -lgpgme -lassuan -lgpg-error" -X github.com/mattn/go-sqlite3.libVersion=3' -o kube-mqtt-mirror-arm64 && \
     echo "=== Binary Info ===" && \
     file kube-mqtt-mirror-arm64
