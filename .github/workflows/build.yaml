@@ -123,7 +123,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            mosquitto
+            mosquitto \
+            jq
 
       # Generate self-signed TLS certificates
       - name: Generate TLS certificates
@@ -297,8 +298,12 @@ jobs:
           EOF
           
           kubectl apply -f webhook.yaml
+
+          # Show initial registry state
+          echo "=== Initial Registry State ==="
+          curl -s http://localhost:5000/v2/_catalog
           
-          # Create test pod
+          # Create test pod and monitor image pull
           echo "Creating test pod..."
           kubectl apply -f - <<EOF
           apiVersion: v1
@@ -313,13 +318,48 @@ jobs:
                 image: nginx
           EOF
           
-          # Wait for pod creation and verify
-          echo "Waiting for pod creation..."
+          # Wait for pod creation and monitor progress
+          echo "Waiting for pod creation and monitoring events..."
+          kubectl get events --watch --field-selector involvedObject.name=webhook-test-pod &
+          EVENTS_PID=$!
+
+          # Wait for pod to be ready
           if ! kubectl wait --for=condition=ready pod/webhook-test-pod --timeout=60s; then
             echo "Pod creation failed"
+            kill $EVENTS_PID
+            echo "=== Pod Description ==="
             kubectl describe pod webhook-test-pod
+            echo "=== Pod Logs ==="
+            kubectl logs webhook-test-pod
             exit 1
           fi
+
+          # Stop watching events
+          kill $EVENTS_PID
+
+          # Show final pod status
+          echo "=== Final Pod Status ==="
+          kubectl get pod webhook-test-pod -o wide
+          echo "=== Pod Description ==="
+          kubectl describe pod webhook-test-pod
+
+          # Show registry contents
+          echo "=== Registry Contents ==="
+          curl -s http://localhost:5000/v2/_catalog
+          
+          # Show image details for nginx
+          echo "=== Image Tags ==="
+          curl -s http://localhost:5000/v2/nginx/tags/list
+          
+          # Show image manifest
+          echo "=== Image Manifest ==="
+          DIGEST=$(curl -s -H "Accept: application/vnd.docker.distribution.manifest.v2+json" http://localhost:5000/v2/nginx/manifests/latest | jq -r '.config.digest')
+          curl -s -L -H "Accept: application/vnd.docker.container.image.v1+json" http://localhost:5000/v2/nginx/blobs/$DIGEST | jq .
+          
+          # Show container image details
+          echo "=== Container Image ==="
+          kubectl get pod webhook-test-pod -o=jsonpath='{.status.containerStatuses[0].imageID}'
+          echo
           
           # Check program logs
           echo "=== Program Logs ==="
