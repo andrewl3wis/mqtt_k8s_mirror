@@ -139,7 +139,7 @@ jobs:
           path: kube-mqtt-mirror-arm64
 
   test:
-    needs: [amd64-build, arm64-build]
+    needs: [amd64-build]
     runs-on: ubuntu-latest
 
     steps:
