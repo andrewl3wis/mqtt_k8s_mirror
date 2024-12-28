@@ -94,8 +94,24 @@ echo "Job: $JOB"
 echo "This will execute the selected job using act..."
 
 # Run the specified job using Ubuntu runner
+# Install static libraries in the act environment
+cat > Dockerfile.act <<EOF
+FROM catthehacker/ubuntu:act-22.04
+RUN apt-get update && apt-get install -y \
+    libgpgme-dev \
+    libbtrfs-dev \
+    libgpg-error-dev \
+    pkg-config \
+    file \
+    gcc \
+    libc6-dev
+EOF
+
+# Build custom act environment
+docker build -t act-env -f Dockerfile.act .
+
 act -j "$JOB" \
-    -P ubuntu-latest=nektos/act-environments-ubuntu:18.04 \
+    -P ubuntu-latest=act-env \
     --bind \
     ${GH_TOKEN:+-s GITHUB_TOKEN="$GH_TOKEN"} \
     -s ACTIONS_RUNTIME_TOKEN="$(openssl rand -hex 16)" \

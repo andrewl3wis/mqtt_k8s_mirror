@@ -11,8 +11,16 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && apt-get install -y \
     libgpgme-dev \
     libbtrfs-dev \
+    libgpg-error-dev \
     pkg-config \
-    file
+    file \
+    gcc \
+    libc6-dev \
+    musl-dev \
+    libgpgme11-dev \
+    libassuan-dev \
+    libgpg-error-static \
+    libassuan-static
 
 # Set up workspace
 WORKDIR /go/src/app
@@ -31,8 +39,6 @@ ENV GOTOOLCHAIN=local
 ENV CGO_ENABLED=1
 ENV GOARCH=amd64
 ENV GO111MODULE=on
-RUN go build -v -o kube-mqtt-mirror-amd64 && \
+RUN go build -v -tags musl,netgo,osusergo -ldflags='-linkmode external -extldflags "-static -L/usr/lib/x86_64-linux-gnu"' -o kube-mqtt-mirror-amd64 && \
     echo "=== Binary Info ===" && \
-    file kube-mqtt-mirror-amd64 && \
-    echo "=== Dependencies ===" && \
-    ldd kube-mqtt-mirror-amd64
+    file kube-mqtt-mirror-amd64
