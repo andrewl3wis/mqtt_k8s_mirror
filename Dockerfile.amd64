@@ -14,10 +14,13 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     pkg-config \
     file
 
-# Set up workspace
+# Set up workspace and handle module caching
 WORKDIR /go/src/app
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download && \
+    mkdir -p /go/pkg/mod/cache/download && \
+    chmod -R 777 /go/pkg/mod
 
 # Build stage
 FROM deps AS builder
