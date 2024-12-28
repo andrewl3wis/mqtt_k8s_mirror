@@ -24,12 +24,13 @@ import (
 
 // Configuration
 var (
-	enableWebhook = flag.Bool("webhook", false, "Enable Kubernetes webhook monitoring")
-	enableMirror  = flag.Bool("mirror", false, "Enable MQTT-based image mirroring")
-	mqttBroker    = flag.String("mqtt-broker", "tcp://mqtt.broker.address:1883", "MQTT broker address")
-	mqttTopic     = flag.String("mqtt-topic", "image/download", "MQTT topic for image download requests")
-	localRegistry = flag.String("local-registry", "localhost:5000", "Local Docker registry address")
-	webhookPort   = flag.String("webhook-port", "8443", "Port to listen for webhook calls")
+	enableWebhook      = flag.Bool("webhook", false, "Enable Kubernetes webhook monitoring")
+	enableMirror       = flag.Bool("mirror", false, "Enable MQTT-based image mirroring")
+	mqttBroker         = flag.String("mqtt-broker", "tcp://mqtt.broker.address:1883", "MQTT broker address")
+	mqttTopic          = flag.String("mqtt-topic", "image/download", "MQTT topic for image download requests")
+	localRegistry      = flag.String("local-registry", "localhost:5000", "Local Docker registry address")
+	webhookPort        = flag.String("webhook-port", "8443", "Port to listen for webhook calls")
+	insecureRegistries = flag.Bool("insecure-registries", false, "Allow connections to insecure registries (HTTP)")
 )
 
 // MQTT message payload structure
@@ -145,6 +146,11 @@ func imageExistsInLocalRegistry(image string) bool {
 	// Create a new context
 	ctx := context.Background()
 
+	// Create a system context to configure registry behavior
+	sysCtx := &types.SystemContext{
+		DockerInsecureSkipTLSVerify: types.NewOptionalBool(*insecureRegistries),
+	}
+
 	// Parse the image reference
 	ref, err := alltransports.ParseImageName(fmt.Sprintf("docker://%s/%s", *localRegistry, image))
 	if err != nil {
@@ -153,7 +159,7 @@ func imageExistsInLocalRegistry(image string) bool {
 	}
 
 	// Check if the image exists
-	_, err = ref.NewImageSource(ctx, &types.SystemContext{})
+	_, err = ref.NewImageSource(ctx, sysCtx)
 	return err == nil
 }
 
@@ -173,6 +179,11 @@ func copyImage(srcImage, destImage string) error {
 		return fmt.Errorf("failed to parse destination image: %v", err)
 	}
 
+	// Create a system context to configure registry behavior
+	sysCtx := &types.SystemContext{
+		DockerInsecureSkipTLSVerify: types.NewOptionalBool(*insecureRegistries),
+	}
+
 	// Create a policy context to allow all images
 	policyContext, err := signature.NewPolicyContext(&signature.Policy{
 		Default: []signature.PolicyRequirement{signature.NewPRInsecureAcceptAnything()},
@@ -183,7 +194,9 @@ func copyImage(srcImage, destImage string) error {
 
 	// Copy the image
 	_, err = copy.Image(ctx, policyContext, destRef, srcRef, &copy.Options{
-		ReportWriter: log.Writer(),
+		ReportWriter:   log.Writer(),
+		SourceCtx:      sysCtx,
+		DestinationCtx: sysCtx,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to copy image: %v", err)

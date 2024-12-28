@@ -108,7 +108,7 @@ jobs:
       - name: Deploy and test
         run: |
           # Start the program in the background
-          ./combined_mirror --webhook --mirror --mqtt-broker tcp://localhost:1883 --webhook-port 8443 &
+          ./combined_mirror --webhook --mirror --mqtt-broker tcp://localhost:1883 --webhook-port 8443 --insecure-registries &
           PROGRAM_PID=$!
           
           CA_BUNDLE=$(cat server.crt | base64 | tr -d '\n')
