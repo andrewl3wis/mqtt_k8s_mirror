@@ -34,24 +34,20 @@ jobs:
           # Create builder instance with cache
           docker buildx create --use --name amd64-builder
 
-          # Prepare output directory
-          mkdir -p buildx-output
-          chmod -R 777 buildx-output
-
           # Build using buildx with enhanced caching
           docker buildx build \
             --cache-from=type=gha \
             --cache-to=type=gha,mode=max \
             --build-arg BUILDKIT_INLINE_CACHE=1 \
-            --output type=local,dest=./buildx-output \
+            --output "type=tar,dest=output.tar" \
             --progress=plain \
             -f Dockerfile.amd64 .
 
-          # Move binary to expected location
-          mv buildx-output/go/src/app/kube-mqtt-mirror-amd64 .
+          # Extract binary from tar
+          tar xf output.tar go/src/app/kube-mqtt-mirror-amd64
+          mv go/src/app/kube-mqtt-mirror-amd64 .
+          rm -rf go output.tar
 
-          # Create symbolic link for testing
-          ln -s kube-mqtt-mirror-amd64 kube-mqtt-mirror
 
       # Upload AMD64 binary as artifact
       - name: Upload AMD64 binary
@@ -80,22 +76,20 @@ jobs:
           # Create builder instance with cache
           docker buildx create --use --name arm64-builder
 
-          # Prepare output directory
-          mkdir -p buildx-output
-          chmod -R 777 buildx-output
-
           # Build using buildx with enhanced caching
           docker buildx build \
             --platform=linux/arm64 \
             --cache-from=type=gha \
             --cache-to=type=gha,mode=max \
             --build-arg BUILDKIT_INLINE_CACHE=1 \
-            --output type=local,dest=./buildx-output \
+            --output "type=tar,dest=output.tar" \
             --progress=plain \
             -f Dockerfile.arm64 .
 
-          # Move binary to expected location
-          mv buildx-output/go/src/app/kube-mqtt-mirror-arm64 .
+          # Extract binary from tar
+          tar xf output.tar go/src/app/kube-mqtt-mirror-arm64
+          mv go/src/app/kube-mqtt-mirror-arm64 .
+          rm -rf go output.tar
 
       # Upload ARM64 binary as artifact
       - name: Upload ARM64 binary
@@ -105,7 +99,7 @@ jobs:
           path: kube-mqtt-mirror-arm64
 
   test:
-    needs: [amd64-build, arm64-build]
+    needs: [amd64-build]
     runs-on: ubuntu-22.04
 
     steps:
