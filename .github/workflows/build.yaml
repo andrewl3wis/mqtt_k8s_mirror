@@ -61,6 +61,11 @@ jobs:
         run: |
           sudo mkdir -p /tmp/.buildx-cache
           sudo chmod -R 777 /tmp/.buildx-cache
+          # Initialize cache index if it doesn't exist
+          if [ ! -f /tmp/.buildx-cache/index.json ]; then
+            echo '{"Manifests":[]}' | sudo tee /tmp/.buildx-cache/index.json
+            sudo chmod 666 /tmp/.buildx-cache/index.json
+          fi
 
       # Build AMD64 binary in Docker
       - name: Build AMD64 binary
@@ -91,8 +96,10 @@ jobs:
           COPY go.mod go.sum ./
           RUN --mount=type=cache,target=/go/pkg/mod \
               mkdir -p /go/pkg/mod && \
-              chmod 777 /go/pkg/mod && \
-              go mod download
+              chmod -R 777 /go/pkg/mod && \
+              go mod download && \
+              mkdir -p /go/pkg/mod/dario.cat && \
+              chmod -R 777 /go/pkg/mod/dario.cat
 
           # Build stage
           FROM deps AS builder
@@ -112,14 +119,21 @@ jobs:
               ldd kube-mqtt-mirror-amd64
           EOF
 
+          # Prepare output directory
+          mkdir -p buildx-output
+          chmod -R 777 buildx-output
+
           # Build using buildx with enhanced caching
           docker buildx build \
             --cache-from=type=local,src=/tmp/.buildx-cache \
             --cache-to=type=local,dest=/tmp/.buildx-cache-new,mode=max \
             --build-arg BUILDKIT_INLINE_CACHE=1 \
-            --output type=local,dest=. \
+            --output type=local,dest=./buildx-output \
             --progress=plain \
             -f Dockerfile.amd64 .
+
+          # Move binary to expected location
+          mv buildx-output/go/src/app/kube-mqtt-mirror-amd64 .
 
           # Move cache to prevent cache growth
           rm -rf /tmp/.buildx-cache
@@ -162,6 +176,11 @@ jobs:
         run: |
           sudo mkdir -p /tmp/.buildx-cache
           sudo chmod -R 777 /tmp/.buildx-cache
+          # Initialize cache index if it doesn't exist
+          if [ ! -f /tmp/.buildx-cache/index.json ]; then
+            echo '{"Manifests":[]}' | sudo tee /tmp/.buildx-cache/index.json
+            sudo chmod 666 /tmp/.buildx-cache/index.json
+          fi
 
       - name: Build ARM64 binary in Docker
         run: |
@@ -190,8 +209,10 @@ jobs:
           COPY go.mod go.sum ./
           RUN --mount=type=cache,target=/go/pkg/mod \
               mkdir -p /go/pkg/mod && \
-              chmod 777 /go/pkg/mod && \
-              go mod download
+              chmod -R 777 /go/pkg/mod && \
+              go mod download && \
+              mkdir -p /go/pkg/mod/dario.cat && \
+              chmod -R 777 /go/pkg/mod/dario.cat
 
           # Build stage
           FROM deps AS builder
@@ -217,13 +238,13 @@ jobs:
               echo "=== Dependencies ===" && \
               ldd kube-mqtt-mirror-arm64 && \
               echo "=== Copying Dependencies ===" && \
-              mkdir -p /build/deps && \
+              mkdir -p /go/src/app/deps && \
               ldd kube-mqtt-mirror-arm64 | \
               grep "=> /" | \
               awk '{print $3}' | \
-              xargs -I '{}' bash -c 'mkdir -p "/build/deps/$(dirname {})" && cp -v "{}" "/build/deps/{}"' && \
+              xargs -I '{}' bash -c 'mkdir -p "/go/src/app/deps/$(dirname {})" && cp -v "{}" "/go/src/app/deps/{}"' && \
               echo "=== Copied Files ===" && \
-              find /build/deps -type f -exec ls -l {} \;
+              find /go/src/app/deps -type f -exec ls -l {} \;
 
           # Final stage
           FROM --platform=linux/arm64 debian:bookworm-slim
@@ -235,8 +256,8 @@ jobs:
               file
 
           # Copy binary and all dependencies
-          COPY --from=builder /build/kube-mqtt-mirror-arm64 /kube-mqtt-mirror-arm64
-          COPY --from=builder /build/deps/ /
+          COPY --from=builder /go/src/app/kube-mqtt-mirror-arm64 /kube-mqtt-mirror-arm64
+          COPY --from=builder /go/src/app/deps/ /
           
           # Verify environment and dependencies
           RUN echo "=== System Information ===" && \
@@ -256,15 +277,22 @@ jobs:
               ls -l /usr/lib/aarch64-linux-gnu/libbtrfs.so*
           EOF
 
+          # Prepare output directory
+          mkdir -p buildx-output
+          chmod -R 777 buildx-output
+
           # Build using buildx with enhanced caching
           docker buildx build \
             --platform=linux/arm64 \
             --cache-from=type=local,src=/tmp/.buildx-cache \
             --cache-to=type=local,dest=/tmp/.buildx-cache-new,mode=max \
             --build-arg BUILDKIT_INLINE_CACHE=1 \
-            --output type=local,dest=. \
+            --output type=local,dest=./buildx-output \
             --progress=plain \
             -f Dockerfile.arm64 .
+
+          # Move binary to expected location
+          mv buildx-output/go/src/app/kube-mqtt-mirror-arm64 .
 
           # Move cache to prevent cache growth
           rm -rf /tmp/.buildx-cache
