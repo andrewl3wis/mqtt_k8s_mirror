@@ -21,7 +21,8 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
-          go-version: '1.22'  # Use Go 1.22 or later
+          go-version: '=1.23.4'  # Exact version match
+          check-latest: true
       
       # Cache Go modules
       - name: Cache Go modules
@@ -45,19 +46,39 @@ jobs:
             libbtrfs-dev \
             pkg-config
 
-      # Add dependencies and tidy
-      - name: Add dependencies
+      # Verify and download dependencies
+      - name: Verify dependencies
         run: |
-          go get github.com/containers/image/v5/copy
-          go get github.com/eclipse/paho.mqtt.golang
-          go mod tidy
+          echo "=== Go Module Information ==="
+          go version
+          go mod verify
+          go mod graph
+          go mod download -json
+          go list -m all
 
       # Build the Go binary for AMD64
       - name: Build AMD64 binary
         run: |
-          # Build for AMD64
-          CGO_ENABLED=1 GOARCH=amd64 go build -v -x -o kube-mqtt-mirror-amd64
-          echo "Built AMD64 binary: kube-mqtt-mirror-amd64"
+          # Set environment variables
+          export GOTOOLCHAIN=local
+          export CGO_ENABLED=1
+          export GOARCH=amd64
+          export GO111MODULE=on
+
+          # Show build environment
+          echo "=== Go Environment ==="
+          go env
+          
+          # Build with detailed logging
+          go build -v -x -o kube-mqtt-mirror-amd64 2>&1 | tee build.log
+          
+          # Show binary info
+          echo "=== AMD64 Binary Info ==="
+          file kube-mqtt-mirror-amd64
+          echo "=== Dependencies ==="
+          ldd kube-mqtt-mirror-amd64
+          echo "=== Library Files ==="
+          ldd kube-mqtt-mirror-amd64 | grep "=> /" | awk '{print $3}' | xargs ls -l
           
           # Create a symbolic link to amd64 version as default for testing
           ln -s kube-mqtt-mirror-amd64 kube-mqtt-mirror
@@ -85,28 +106,92 @@ jobs:
 
       - name: Build ARM64 binary in Docker
         run: |
-          # Create Dockerfile for ARM64 build
+          # Create Dockerfile for ARM64 build with multi-stage build
           cat > Dockerfile.arm64 <<EOF
-          FROM --platform=linux/arm64 golang:1.22-bookworm
+          # Build stage
+          FROM --platform=linux/arm64 golang:1.23.4-bookworm AS builder
 
           # Install build dependencies
           RUN apt-get update && apt-get install -y \
               libgpgme-dev \
               libbtrfs-dev \
-              pkg-config
+              pkg-config \
+              file
 
           WORKDIR /build
+          COPY go.mod go.sum ./
+          
+          # Verify and download dependencies
+          RUN echo "=== Go Module Information ===" && \
+              go version && \
+              go mod verify && \
+              go mod graph && \
+              go mod download -json && \
+              go list -m all
+
           COPY . .
 
-          # Build the binary
-          RUN go get github.com/containers/image/v5/copy && \
-              go get github.com/eclipse/paho.mqtt.golang && \
-              go mod tidy && \
-              CGO_ENABLED=1 GOARCH=arm64 go build -v -o kube-mqtt-mirror-arm64
+          # Verify Go environment
+          RUN echo "=== Go Environment ===" && \
+              go version && \
+              go env GOARCH GOOS CGO_ENABLED GOTOOLCHAIN
+
+          # Build the binary with detailed logging
+          ENV GOTOOLCHAIN=local
+          ENV CGO_ENABLED=1
+          ENV GOARCH=arm64
+          ENV GO111MODULE=on
+          RUN set -ex && \
+              echo "=== Building with flags ===" && \
+              go env && \
+              go build -v -x -o kube-mqtt-mirror-arm64 2>&1 | tee build.log && \
+              echo "=== Binary Info ===" && \
+              file kube-mqtt-mirror-arm64 && \
+              echo "=== Dependencies ===" && \
+              ldd kube-mqtt-mirror-arm64 && \
+              echo "=== Copying Dependencies ===" && \
+              mkdir -p /build/deps && \
+              ldd kube-mqtt-mirror-arm64 | \
+              grep "=> /" | \
+              awk '{print $3}' | \
+              xargs -I '{}' bash -c 'mkdir -p "/build/deps/$(dirname {})" && cp -v "{}" "/build/deps/{}"' && \
+              echo "=== Copied Files ===" && \
+              find /build/deps -type f -exec ls -l {} \;
+
+          # Final stage
+          FROM --platform=linux/arm64 debian:bookworm-slim
+
+          # Install runtime dependencies
+          RUN apt-get update && apt-get install -y \
+              libgpgme11 \
+              libbtrfs0 \
+              file
+
+          # Copy binary and all dependencies
+          COPY --from=builder /build/kube-mqtt-mirror-arm64 /kube-mqtt-mirror-arm64
+          COPY --from=builder /build/deps/ /
+          
+          # Verify environment and dependencies
+          RUN echo "=== System Information ===" && \
+              uname -a && \
+              echo "=== Library Search Paths ===" && \
+              ldconfig -v 2>/dev/null | grep -v "^$" && \
+              echo "=== Binary Dependencies ===" && \
+              ldd /kube-mqtt-mirror-arm64
+          
+          # Verify binary and its dependencies
+          RUN echo "=== Binary Info in Final Stage ===" && \
+              file /kube-mqtt-mirror-arm64 && \
+              echo "=== Library Dependencies ===" && \
+              ldd /kube-mqtt-mirror-arm64 && \
+              echo "=== Library Files ===" && \
+              ls -l /usr/lib/aarch64-linux-gnu/libgpgme.so* && \
+              ls -l /usr/lib/aarch64-linux-gnu/libbtrfs.so*
           EOF
 
           # Build using buildx
-          docker buildx build --platform linux/arm64 \
+          docker buildx build \
+            --platform=linux/arm64 \
             --output type=local,dest=. \
             -f Dockerfile.arm64 .
 
