@@ -288,15 +288,28 @@ func (app *AppContext) copyImage(srcImage, destImage string) error {
 		return fmt.Errorf("failed to create policy context: %v", err)
 	}
 
+	app.logger.Printf("Starting image copy from %s to %s", srcImage, destImage)
+	app.logger.Printf("Source reference: %s", srcRef.StringWithinTransport())
+	app.logger.Printf("Destination reference: %s", destRef.StringWithinTransport())
+
+	progressChan := make(chan types.ProgressProperties)
+	go func() {
+		for p := range progressChan {
+			app.logger.Printf("Progress: %+v", p)
+		}
+	}()
+
 	_, err = copy.Image(ctx, policyContext, destRef, srcRef, &copy.Options{
 		ReportWriter:   app.logger.Writer(),
 		SourceCtx:      sysCtx,
 		DestinationCtx: sysCtx,
+		Progress:       progressChan,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to copy image: %v", err)
 	}
 
+	app.logger.Printf("Image copy completed successfully: %s -> %s", srcImage, destImage)
 	return nil
 }
 

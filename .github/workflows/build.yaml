@@ -255,11 +255,11 @@ jobs:
           
           # Wait for the program to start and verify it's running
           echo "Waiting for program to start..."
-          start_timeout=30
+          start_timeout=10
           started=false
           
           for i in $(seq 1 $start_timeout); do
-            if [ -f kube-mqtt-mirror.log ] && grep -q "Starting server" kube-mqtt-mirror.log; then
+            if [ -f kube-mqtt-mirror.log ] && grep -q "Webhook server listening on port" kube-mqtt-mirror.log; then
               echo "Program started successfully after ${i} seconds"
               started=true
               break
@@ -344,14 +344,39 @@ jobs:
 
           # Monitor mirroring progress
           echo "Monitoring mirroring progress..."
-          for i in {1..6}; do
-            echo -e "\n=== Registry State (Check $i) ==="
-            curl -v http://localhost:5000/v2/_catalog || true
-            echo -e "\n=== Current Program Logs ==="
-            cat kube-mqtt-mirror.log
-            echo -e "\nWaiting 10 seconds..."
-            sleep 10
+          echo -e "\n=== Initial Registry State ==="
+          curl -s http://localhost:5000/v2/_catalog || true
+
+          # Wait for mirroring to start and complete
+          echo -e "\n=== Mirroring Progress ==="
+          timeout=60
+          for i in $(seq 1 $timeout); do
+            if grep -q "Image copy completed successfully" kube-mqtt-mirror.log; then
+              echo "Mirroring completed successfully"
+              break
+            fi
+            
+            # Show new log entries
+            echo -e "\n=== New Log Entries ==="
+            tail -n 5 kube-mqtt-mirror.log
+            
+            # Check registry state
+            if [ $((i % 10)) -eq 0 ]; then
+              echo -e "\n=== Registry State at ${i}s ==="
+              curl -s http://localhost:5000/v2/_catalog || true
+            fi
+            
+            if [ $i -eq $timeout ]; then
+              echo "Timeout waiting for mirroring to complete"
+              exit 1
+            fi
+            
+            sleep 1
           done
+
+          # Show final registry state
+          echo -e "\n=== Final Registry State ==="
+          curl -s http://localhost:5000/v2/_catalog || true
 
           # Wait for pod to be ready
           if ! kubectl wait --for=condition=ready pod/webhook-test-pod --timeout=60s; then
