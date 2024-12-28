@@ -7,8 +7,11 @@ on:
     branches: [ main ]
 
 jobs:
-  test-sqlite:
+  test:
     runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        messaging: [sqlite, mqtt, postgres]
     steps:
       - uses: actions/checkout@v3
 
@@ -82,6 +85,56 @@ jobs:
             -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:$DOCKER_HOST_IP"
           chmod 600 server.key server.crt
 
+      - name: Setup MQTT (if needed)
+        if: matrix.messaging == 'mqtt'
+        run: |
+          # Install Mosquitto
+          sudo apt-get update
+          sudo apt-get install -y mosquitto
+          
+          # Configure Mosquitto for testing
+          echo "listener 1883" | sudo tee /etc/mosquitto/conf.d/test.conf
+          echo "allow_anonymous true" | sudo tee -a /etc/mosquitto/conf.d/test.conf
+          
+          # Start Mosquitto
+          sudo systemctl start mosquitto
+          echo "MQTT broker started on port 1883"
+
+      - name: Setup Postgres (if needed)
+        if: matrix.messaging == 'postgres'
+        run: |
+          # Start PostgreSQL
+          docker run -d --name postgres \
+            -e POSTGRES_USER=test \
+            -e POSTGRES_PASSWORD=test \
+            -e POSTGRES_DB=test \
+            -p 5432:5432 \
+            postgres:14-alpine
+
+          # Wait for PostgreSQL to be ready
+          timeout=30
+          for i in $(seq 1 $timeout); do
+            if docker exec postgres pg_isready -U test > /dev/null 2>&1; then
+              echo "PostgreSQL is ready"
+              break
+            fi
+            if [ $i -eq $timeout ]; then
+              echo "PostgreSQL failed to start"
+              exit 1
+            fi
+            echo "Waiting for PostgreSQL ($i/$timeout)..."
+            sleep 1
+          done
+
+          # Create required table
+          docker exec postgres psql -U test -d test -c "
+            CREATE TABLE IF NOT EXISTS messages (
+              id SERIAL PRIMARY KEY,
+              topic TEXT NOT NULL,
+              payload TEXT NOT NULL,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );"
+
       - name: Run Kind Test
         run: |
           # Get Docker host IP
@@ -91,12 +144,26 @@ jobs:
           # Create log file
           touch kube-mqtt-mirror.log
 
+          # Configure messaging settings based on type
+          BROKER_ADDR=""
+          case "${{ matrix.messaging }}" in
+            "sqlite")
+              BROKER_ADDR="test.db"
+              ;;
+            "mqtt")
+              BROKER_ADDR="tcp://localhost:1883"
+              ;;
+            "postgres")
+              BROKER_ADDR="postgres://test:test@localhost:5432/test?sslmode=disable"
+              ;;
+          esac
+
           # Start the program
           ./kube-mqtt-mirror \
             -webhook \
             -mirror \
-            -messaging-type sqlite \
-            -broker test.db \
+            -messaging-type ${{ matrix.messaging }} \
+            -broker "$BROKER_ADDR" \
             -webhook-port 8443 \
             -local-registry localhost:5000 \
             -insecure-registries \
@@ -246,3 +313,16 @@ jobs:
           kill $MIRROR_PID || true
           kubectl delete -f webhook.yaml
           kubectl delete pod webhook-test-pod
+
+      - name: Cleanup Services
+        if: always()
+        run: |
+          case "${{ matrix.messaging }}" in
+            "postgres")
+              docker rm -f postgres || true
+              ;;
+            "mqtt")
+              sudo systemctl stop mosquitto || true
+              sudo rm -f /etc/mosquitto/conf.d/test.conf || true
+              ;;
+          esac
