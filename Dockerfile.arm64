@@ -19,8 +19,14 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     musl-dev \
     libgpgme11-dev \
     libassuan-dev \
-    libgpg-error-static \
-    libassuan-static
+    libgpg-error-dev \
+    libassuan-dev \
+    libgpgme11-dev \
+    libgpg-error-dev \
+    libassuan-dev \
+    libgpgme-dev \
+    libgpg-error-dev \
+    libassuan-dev
 
 # Set up workspace
 WORKDIR /go/src/app
@@ -43,6 +49,6 @@ ENV GOTOOLCHAIN=local
 ENV CGO_ENABLED=1
 ENV GOARCH=arm64
 ENV GO111MODULE=on
-RUN go build -v -tags musl,netgo,osusergo -ldflags='-linkmode external -extldflags "-static -L/usr/lib/aarch64-linux-gnu"' -o kube-mqtt-mirror-arm64 && \
+RUN go build -v -tags musl,netgo,osusergo -ldflags='-linkmode external -extldflags "-static -L/usr/lib/aarch64-linux-gnu -lgpgme -lassuan -lgpg-error"' -o kube-mqtt-mirror-arm64 && \
     echo "=== Binary Info ===" && \
     file kube-mqtt-mirror-arm64
