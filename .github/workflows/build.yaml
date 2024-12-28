@@ -21,7 +21,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
-          go-version: '1.23'  # Use Go 1.22.10 or later
+          go-version: '1.22'  # Use Go 1.22 or later
       
       # Cache Go modules
       - name: Cache Go modules
@@ -49,7 +49,7 @@ jobs:
       # Initialize Go module
       - name: Initialize Go module
         run: |
-          go mod init your-repo
+          go mod init mqtt_k8s_mirror
 
       # Add dependencies and tidy
       - name: Add dependencies
@@ -66,7 +66,15 @@ jobs:
       # Generate self-signed TLS certificates
       - name: Generate TLS certificates
         run: |
-          openssl req -x509 -newkey rsa:2048 -keyout server.key -out server.crt -days 365 -nodes -subj "/CN=host.docker.internal" -addext "subjectAltName=IP:172.17.0.1"
+          # Generate TLS certificates with proper paths
+          openssl req -x509 -newkey rsa:2048 \
+            -keyout server.key \
+            -out server.crt \
+            -days 365 \
+            -nodes \
+            -subj "/CN=host.docker.internal" \
+            -addext "subjectAltName=IP:172.17.0.1"
+          chmod 600 server.key server.crt
 
       # # Write the custom Kind configuration file
       # - name: Write Kind configuration
@@ -107,8 +115,16 @@ jobs:
       # Deploy the program and test it
       - name: Deploy and test
         run: |
-          # Start the program in the background
-          ./combined_mirror --webhook --mirror --mqtt-broker tcp://localhost:1883 --webhook-port 8443 --insecure-registries &
+          # Start the program in the background with new configuration
+          ./combined_mirror \
+            --webhook \
+            --mirror \
+            --mqtt-broker tcp://localhost:1883 \
+            --webhook-port 8443 \
+            --insecure-registries \
+            --tls-cert server.crt \
+            --tls-key server.key \
+            --log-file combined_mirror.log &
           PROGRAM_PID=$!
           
           CA_BUNDLE=$(cat server.crt | base64 | tr -d '\n')
@@ -153,8 +169,17 @@ jobs:
           # Wait for the pod to be created
           sleep 10
 
-          # Check the logs of the program
-          cat combined_mirror.log
+          # Wait for log file to be created and populated
+          sleep 5
+          
+          # Check if log file exists and show contents
+          if [ -f combined_mirror.log ]; then
+            echo "=== Program Logs ==="
+            cat combined_mirror.log
+          else
+            echo "Error: Log file combined_mirror.log not found"
+            exit 1
+          fi
 
           # Clean up
           kill $PROGRAM_PID
