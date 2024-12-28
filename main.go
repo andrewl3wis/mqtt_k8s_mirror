@@ -356,7 +356,7 @@ func (app *AppContext) startWebhookServer(ctx context.Context) error {
 	mux.HandleFunc("/webhook", app.handleWebhook)
 
 	app.server = &http.Server{
-		Addr:    fmt.Sprintf(":%s", app.config.WebhookPort),
+		Addr:    "0.0.0.0:" + app.config.WebhookPort,
 		Handler: mux,
 	}
 
@@ -367,7 +367,8 @@ func (app *AppContext) startWebhookServer(ctx context.Context) error {
 		app.wg.Done()
 	}()
 
-	return app.server.ListenAndServe()
+	app.logger.Printf("Starting webhook server with TLS on 0.0.0.0:%s", app.config.WebhookPort)
+	return app.server.ListenAndServeTLS(app.config.TLSCertPath, app.config.TLSKeyPath)
 }
 
 func (app *AppContext) handleWebhook(w http.ResponseWriter, r *http.Request) {

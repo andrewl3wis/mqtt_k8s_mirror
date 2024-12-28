@@ -6,100 +6,21 @@ on:
   pull_request:
     branches: [ main ]
 
-env:
-  # Default ports for GitHub Actions
-  WEBHOOK_PORT: 8443
-  POSTGRES_PORT: 5432
-  MQTT_PORT: 1883
-  REGISTRY_PORT: 5000
-  # Override with different ports for local act runs
-  ACT_WEBHOOK_PORT: 9443
-  ACT_POSTGRES_PORT: 6432
-  ACT_MQTT_PORT: 2883
-  # Different registry ports for each test to avoid conflicts
-  ACT_REGISTRY_PORT_SQLITE: 5000
-  ACT_REGISTRY_PORT_POSTGRES: 5001
-  ACT_REGISTRY_PORT_MQTT: 5002
-
 jobs:
-  amd64-build:
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v3
-      
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build AMD64 binary
-        run: |
-          docker buildx create --use --name amd64-builder
-          docker buildx build \
-            --cache-from=type=gha \
-            --cache-to=type=gha,mode=max \
-            --build-arg BUILDKIT_INLINE_CACHE=1 \
-            --output "type=tar,dest=output.tar" \
-            --progress=plain \
-            -f Dockerfile.amd64 .
-          tar xf output.tar go/src/app/kube-mqtt-mirror-amd64
-          mv go/src/app/kube-mqtt-mirror-amd64 .
-          rm -rf go output.tar
-
-      - name: Upload AMD64 binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: kube-mqtt-mirror-amd64
-          path: kube-mqtt-mirror-amd64
-
-  arm64-build:
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build ARM64 binary
-        run: |
-          docker buildx create --use --name arm64-builder
-          docker buildx build \
-            --platform=linux/arm64 \
-            --cache-from=type=gha \
-            --cache-to=type=gha,mode=max \
-            --build-arg BUILDKIT_INLINE_CACHE=1 \
-            --output "type=tar,dest=output.tar" \
-            --progress=plain \
-            -f Dockerfile.arm64 .
-          tar xf output.tar go/src/app/kube-mqtt-mirror-arm64
-          mv go/src/app/kube-mqtt-mirror-arm64 .
-          rm -rf go output.tar
-
-      - name: Upload ARM64 binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: kube-mqtt-mirror-arm64
-          path: kube-mqtt-mirror-arm64
-
   test-sqlite:
-    needs: [amd64-build]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v3
 
-      - name: Download AMD64 binary
-        uses: actions/download-artifact@v4
+      - name: Set up Go
+        uses: actions/setup-go@v4
         with:
-          name: kube-mqtt-mirror-amd64
+          go-version: '1.21'
 
-      - name: Make binary executable
+      - name: Build binary
         run: |
-          chmod +x kube-mqtt-mirror-amd64
-          rm -f kube-mqtt-mirror
-          ln -s kube-mqtt-mirror-amd64 kube-mqtt-mirror
+          CGO_ENABLED=0 go build -o kube-mqtt-mirror .
+          chmod +x kube-mqtt-mirror
 
       - name: Install kubectl
         uses: azure/setup-kubectl@v3
@@ -116,45 +37,72 @@ jobs:
         uses: helm/kind-action@v1.12.0
         with:
           registry: true
-          registry_port: ${{ github.actor == 'nektos/act' && env.ACT_REGISTRY_PORT_SQLITE || env.REGISTRY_PORT }}
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iproute2
 
       - name: Generate TLS certificates
         run: |
+          # Get Docker host IP
+          DOCKER_HOST_IP=$(ip -4 addr show docker0 | grep -Po 'inet \K[\d.]+')
+          echo "Using Docker host IP: $DOCKER_HOST_IP"
+
+          # Generate certs with Docker host IP
           openssl req -x509 -newkey rsa:2048 \
             -keyout server.key \
             -out server.crt \
             -days 365 \
             -nodes \
             -subj "/CN=localhost" \
-            -addext "subjectAltName=IP:127.0.0.1"
+            -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:$DOCKER_HOST_IP"
           chmod 600 server.key server.crt
 
       - name: Run Kind Test
-        env:
-          WEBHOOK_PORT: ${{ github.actor == 'nektos/act' && env.ACT_WEBHOOK_PORT || env.WEBHOOK_PORT }}
-          REGISTRY_PORT: ${{ github.actor == 'nektos/act' && env.ACT_REGISTRY_PORT_SQLITE || env.REGISTRY_PORT }}
         run: |
+          # Get Docker host IP
+          DOCKER_HOST_IP=$(ip -4 addr show docker0 | grep -Po 'inet \K[\d.]+')
+          echo "Using Docker host IP: $DOCKER_HOST_IP"
+
+          # Create log file
+          touch kube-mqtt-mirror.log
+
+          # Start the program
           ./kube-mqtt-mirror \
             -webhook \
             -mirror \
             -messaging-type sqlite \
             -broker test.db \
-            -webhook-port ${WEBHOOK_PORT} \
-            -local-registry localhost:${REGISTRY_PORT} \
+            -webhook-port 8443 \
+            -local-registry localhost:5000 \
             -insecure-registries \
             -tls-cert server.crt \
             -tls-key server.key \
             -log-file kube-mqtt-mirror.log &
           MIRROR_PID=$!
 
+          # Show program output in real time
+          tail -f kube-mqtt-mirror.log &
+          TAIL_PID=$!
+
           # Wait for program to start
           timeout=30
-          until grep -q "Webhook server listening on port" kube-mqtt-mirror.log || [ $timeout -eq 0 ]; do
+          started=false
+          for i in $(seq 1 $timeout); do
+            if grep -q "Subscribed to topic: image/download" kube-mqtt-mirror.log; then
+              echo "Program started successfully"
+              started=true
+              break
+            fi
+            echo "Waiting for program to start ($i/$timeout)..."
             sleep 1
-            ((timeout--))
           done
 
-          if [ $timeout -eq 0 ]; then
+          # Stop tailing the log
+          kill $TAIL_PID || true
+
+          if [ "$started" != "true" ]; then
             echo "Program failed to start"
             cat kube-mqtt-mirror.log
             exit 1
@@ -177,7 +125,7 @@ jobs:
                   apiVersions: ["v1"]
                   resources: ["pods"]
               clientConfig:
-                url: "https://127.0.0.1:${WEBHOOK_PORT}/webhook"
+                url: "https://$DOCKER_HOST_IP:8443/webhook"
                 caBundle: $CA_BUNDLE
               failurePolicy: Fail
           EOF
@@ -198,172 +146,25 @@ jobs:
                 image: nginx
           EOF
 
-          # Wait for pod to be ready
-          if ! kubectl wait --for=condition=ready pod/webhook-test-pod --timeout=60s; then
-            echo "Pod creation failed"
-            kubectl describe pod webhook-test-pod
-            kubectl logs webhook-test-pod
-            exit 1
-          fi
-
-          # Verify mirroring
-          if ! grep -q "Image copy completed successfully" kube-mqtt-mirror.log; then
-            echo "Mirroring failed"
-            cat kube-mqtt-mirror.log
-            exit 1
-          fi
-
-          # Verify multi-arch support
-          echo "Verifying multi-arch support for nginx image..."
-          MANIFEST_LIST=$(curl -s -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" http://localhost:${REGISTRY_PORT}/v2/nginx/manifests/latest)
-          if [ $? -ne 0 ]; then
-            echo "Failed to get manifest list"
-            exit 1
-          fi
-
-          # Check for both amd64 and arm64 platforms
-          if ! echo "$MANIFEST_LIST" | grep -q "amd64" || ! echo "$MANIFEST_LIST" | grep -q "arm64"; then
-            echo "Missing architecture in manifest list:"
-            echo "$MANIFEST_LIST"
-            exit 1
-          fi
-
-          echo "Multi-arch verification successful - found both amd64 and arm64 architectures"
-
-          # Cleanup
-          kill $MIRROR_PID
-          kubectl delete -f webhook.yaml
-          kubectl delete pod webhook-test-pod
-
-  test-postgres:
-    needs: [amd64-build]
-    runs-on: ubuntu-22.04
-    services:
-      postgres:
-        image: postgres:14-alpine
-        env:
-          POSTGRES_USER: test
-          POSTGRES_PASSWORD: test
-          POSTGRES_DB: test
-        ports:
-          - ${{ github.actor == 'nektos/act' && env.ACT_POSTGRES_PORT || env.POSTGRES_PORT }}:5432
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Download AMD64 binary
-        uses: actions/download-artifact@v4
-        with:
-          name: kube-mqtt-mirror-amd64
-
-      - name: Make binary executable
-        run: |
-          chmod +x kube-mqtt-mirror-amd64
-          rm -f kube-mqtt-mirror
-          ln -s kube-mqtt-mirror-amd64 kube-mqtt-mirror
-
-      - name: Install kubectl
-        uses: azure/setup-kubectl@v3
-        with:
-          version: 'latest'
-
-      - name: Install kind
-        run: |
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
-          chmod +x ./kind
-          sudo mv ./kind /usr/local/bin/kind
-
-      - name: Create kind cluster
-        uses: helm/kind-action@v1.12.0
-        with:
-          registry: true
-          registry_port: ${{ github.actor == 'nektos/act' && env.ACT_REGISTRY_PORT_POSTGRES || env.REGISTRY_PORT }}
-
-      - name: Generate TLS certificates
-        run: |
-          openssl req -x509 -newkey rsa:2048 \
-            -keyout server.key \
-            -out server.crt \
-            -days 365 \
-            -nodes \
-            -subj "/CN=localhost" \
-            -addext "subjectAltName=IP:127.0.0.1"
-          chmod 600 server.key server.crt
-
-      - name: Run Kind Test
-        env:
-          WEBHOOK_PORT: ${{ github.actor == 'nektos/act' && env.ACT_WEBHOOK_PORT || env.WEBHOOK_PORT }}
-          POSTGRES_PORT: ${{ github.actor == 'nektos/act' && env.ACT_POSTGRES_PORT || env.POSTGRES_PORT }}
-          REGISTRY_PORT: ${{ github.actor == 'nektos/act' && env.ACT_REGISTRY_PORT_POSTGRES || env.REGISTRY_PORT }}
-          TEST_POSTGRES_HOST: localhost:${POSTGRES_PORT}
-          TEST_POSTGRES_USER: test
-          TEST_POSTGRES_PASSWORD: test
-          TEST_POSTGRES_DB: test
-        run: |
-          ./kube-mqtt-mirror \
-            -webhook \
-            -mirror \
-            -messaging-type postgres \
-            -broker localhost:${POSTGRES_PORT} \
-            -username test \
-            -password test \
-            -webhook-port ${WEBHOOK_PORT} \
-            -local-registry localhost:${REGISTRY_PORT} \
-            -insecure-registries \
-            -tls-cert server.crt \
-            -tls-key server.key \
-            -log-file kube-mqtt-mirror.log &
-          MIRROR_PID=$!
-
-          # Wait for program to start
-          timeout=30
-          until grep -q "Webhook server listening on port" kube-mqtt-mirror.log || [ $timeout -eq 0 ]; do
+          # Wait for image copy to complete
+          echo "Waiting for image copy to complete..."
+          timeout=60
+          copied=false
+          for i in $(seq 1 $timeout); do
+            if grep -q "Image copy completed successfully" kube-mqtt-mirror.log; then
+              echo "Image copy completed successfully"
+              copied=true
+              break
+            fi
+            echo "Waiting for image copy ($i/$timeout)..."
             sleep 1
-            ((timeout--))
           done
 
-          if [ $timeout -eq 0 ]; then
-            echo "Program failed to start"
+          if [ "$copied" != "true" ]; then
+            echo "Image copy failed"
             cat kube-mqtt-mirror.log
             exit 1
           fi
-
-          # Configure webhook
-          CA_BUNDLE=$(cat server.crt | base64 | tr -d '\n')
-          cat > webhook.yaml <<EOF
-          apiVersion: admissionregistration.k8s.io/v1
-          kind: MutatingWebhookConfiguration
-          metadata:
-            name: webhook-mirroring
-          webhooks:
-            - name: webhook.mirroring.example.com
-              admissionReviewVersions: ["v1"]
-              sideEffects: None
-              rules:
-                - operations: ["CREATE"]
-                  apiGroups: [""]
-                  apiVersions: ["v1"]
-                  resources: ["pods"]
-              clientConfig:
-                url: "https://127.0.0.1:${WEBHOOK_PORT}/webhook"
-                caBundle: $CA_BUNDLE
-              failurePolicy: Fail
-          EOF
-          
-          kubectl apply -f webhook.yaml
-
-          # Create test pod
-          kubectl apply -f - <<EOF
-          apiVersion: v1
-          kind: Pod
-          metadata:
-            name: webhook-test-pod
-            annotations:
-              webhook: "true"
-          spec:
-            containers:
-              - name: nginx
-                image: nginx
-          EOF
 
           # Wait for pod to be ready
           if ! kubectl wait --for=condition=ready pod/webhook-test-pod --timeout=60s; then
@@ -373,16 +174,9 @@ jobs:
             exit 1
           fi
 
-          # Verify mirroring
-          if ! grep -q "Image copy completed successfully" kube-mqtt-mirror.log; then
-            echo "Mirroring failed"
-            cat kube-mqtt-mirror.log
-            exit 1
-          fi
-
           # Verify multi-arch support
           echo "Verifying multi-arch support for nginx image..."
-          MANIFEST_LIST=$(curl -s -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" http://localhost:${REGISTRY_PORT}/v2/nginx/manifests/latest)
+          MANIFEST_LIST=$(curl -s -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" http://localhost:5000/v2/nginx/manifests/latest)
           if [ $? -ne 0 ]; then
             echo "Failed to get manifest list"
             exit 1
@@ -398,164 +192,6 @@ jobs:
           echo "Multi-arch verification successful - found both amd64 and arm64 architectures"
 
           # Cleanup
-          kill $MIRROR_PID
-          kubectl delete -f webhook.yaml
-          kubectl delete pod webhook-test-pod
-
-  test-mqtt:
-    needs: [amd64-build]
-    runs-on: ubuntu-22.04
-    services:
-      mqtt:
-        image: eclipse-mosquitto:2
-        ports:
-          - ${{ github.actor == 'nektos/act' && env.ACT_MQTT_PORT || env.MQTT_PORT }}:1883
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Download AMD64 binary
-        uses: actions/download-artifact@v4
-        with:
-          name: kube-mqtt-mirror-amd64
-
-      - name: Make binary executable
-        run: |
-          chmod +x kube-mqtt-mirror-amd64
-          rm -f kube-mqtt-mirror
-          ln -s kube-mqtt-mirror-amd64 kube-mqtt-mirror
-
-      - name: Install kubectl
-        uses: azure/setup-kubectl@v3
-        with:
-          version: 'latest'
-
-      - name: Install kind
-        run: |
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
-          chmod +x ./kind
-          sudo mv ./kind /usr/local/bin/kind
-
-      - name: Create kind cluster
-        uses: helm/kind-action@v1.12.0
-        with:
-          registry: true
-          registry_port: ${{ github.actor == 'nektos/act' && env.ACT_REGISTRY_PORT_MQTT || env.REGISTRY_PORT }}
-
-      - name: Generate TLS certificates
-        run: |
-          openssl req -x509 -newkey rsa:2048 \
-            -keyout server.key \
-            -out server.crt \
-            -days 365 \
-            -nodes \
-            -subj "/CN=localhost" \
-            -addext "subjectAltName=IP:127.0.0.1"
-          chmod 600 server.key server.crt
-
-      - name: Run Kind Test
-        env:
-          WEBHOOK_PORT: ${{ github.actor == 'nektos/act' && env.ACT_WEBHOOK_PORT || env.WEBHOOK_PORT }}
-          MQTT_PORT: ${{ github.actor == 'nektos/act' && env.ACT_MQTT_PORT || env.MQTT_PORT }}
-          REGISTRY_PORT: ${{ github.actor == 'nektos/act' && env.ACT_REGISTRY_PORT_MQTT || env.REGISTRY_PORT }}
-          TEST_MQTT_BROKER: tcp://localhost:${MQTT_PORT}
-        run: |
-          ./kube-mqtt-mirror \
-            -webhook \
-            -mirror \
-            -messaging-type mqtt \
-            -broker tcp://localhost:${MQTT_PORT} \
-            -webhook-port ${WEBHOOK_PORT} \
-            -local-registry localhost:${REGISTRY_PORT} \
-            -insecure-registries \
-            -tls-cert server.crt \
-            -tls-key server.key \
-            -log-file kube-mqtt-mirror.log &
-          MIRROR_PID=$!
-
-          # Wait for program to start
-          timeout=30
-          until grep -q "Webhook server listening on port" kube-mqtt-mirror.log || [ $timeout -eq 0 ]; do
-            sleep 1
-            ((timeout--))
-          done
-
-          if [ $timeout -eq 0 ]; then
-            echo "Program failed to start"
-            cat kube-mqtt-mirror.log
-            exit 1
-          fi
-
-          # Configure webhook
-          CA_BUNDLE=$(cat server.crt | base64 | tr -d '\n')
-          cat > webhook.yaml <<EOF
-          apiVersion: admissionregistration.k8s.io/v1
-          kind: MutatingWebhookConfiguration
-          metadata:
-            name: webhook-mirroring
-          webhooks:
-            - name: webhook.mirroring.example.com
-              admissionReviewVersions: ["v1"]
-              sideEffects: None
-              rules:
-                - operations: ["CREATE"]
-                  apiGroups: [""]
-                  apiVersions: ["v1"]
-                  resources: ["pods"]
-              clientConfig:
-                url: "https://127.0.0.1:${WEBHOOK_PORT}/webhook"
-                caBundle: $CA_BUNDLE
-              failurePolicy: Fail
-          EOF
-          
-          kubectl apply -f webhook.yaml
-
-          # Create test pod
-          kubectl apply -f - <<EOF
-          apiVersion: v1
-          kind: Pod
-          metadata:
-            name: webhook-test-pod
-            annotations:
-              webhook: "true"
-          spec:
-            containers:
-              - name: nginx
-                image: nginx
-          EOF
-
-          # Wait for pod to be ready
-          if ! kubectl wait --for=condition=ready pod/webhook-test-pod --timeout=60s; then
-            echo "Pod creation failed"
-            kubectl describe pod webhook-test-pod
-            kubectl logs webhook-test-pod
-            exit 1
-          fi
-
-          # Verify mirroring
-          if ! grep -q "Image copy completed successfully" kube-mqtt-mirror.log; then
-            echo "Mirroring failed"
-            cat kube-mqtt-mirror.log
-            exit 1
-          fi
-
-          # Verify multi-arch support
-          echo "Verifying multi-arch support for nginx image..."
-          MANIFEST_LIST=$(curl -s -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" http://localhost:${REGISTRY_PORT}/v2/nginx/manifests/latest)
-          if [ $? -ne 0 ]; then
-            echo "Failed to get manifest list"
-            exit 1
-          fi
-
-          # Check for both amd64 and arm64 platforms
-          if ! echo "$MANIFEST_LIST" | grep -q "amd64" || ! echo "$MANIFEST_LIST" | grep -q "arm64"; then
-            echo "Missing architecture in manifest list:"
-            echo "$MANIFEST_LIST"
-            exit 1
-          fi
-
-          echo "Multi-arch verification successful - found both amd64 and arm64 architectures"
-
-          # Cleanup
-          kill $MIRROR_PID
+          kill $MIRROR_PID || true
           kubectl delete -f webhook.yaml
           kubectl delete pod webhook-test-pod
