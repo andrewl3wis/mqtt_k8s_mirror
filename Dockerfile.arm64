@@ -1,0 +1,82 @@
+# Dependency stage
+FROM --platform=linux/arm64 golang:1.23.4-bookworm AS deps
+
+# Cache apt packages
+RUN rm -f /etc/apt/apt.conf.d/docker-clean && \
+    echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache
+
+# Install build dependencies with cache
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y \
+    libgpgme-dev \
+    libbtrfs-dev \
+    pkg-config \
+    file
+
+# Set up workspace
+WORKDIR /go/src/app
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Build stage
+FROM deps AS builder
+WORKDIR /go/src/app
+COPY . .
+
+# Verify Go environment
+RUN echo "=== Go Environment ===" && \
+    go version && \
+    go env GOARCH GOOS CGO_ENABLED GOTOOLCHAIN
+
+# Build the binary with detailed logging
+ENV GOTOOLCHAIN=local
+ENV CGO_ENABLED=1
+ENV GOARCH=arm64
+ENV GO111MODULE=on
+RUN set -ex && \
+    echo "=== Building with flags ===" && \
+    go env && \
+    go build -v -x -o kube-mqtt-mirror-arm64 2>&1 | tee build.log && \
+    echo "=== Binary Info ===" && \
+    file kube-mqtt-mirror-arm64 && \
+    echo "=== Dependencies ===" && \
+    ldd kube-mqtt-mirror-arm64 && \
+    echo "=== Copying Dependencies ===" && \
+    mkdir -p /go/src/app/deps && \
+    ldd kube-mqtt-mirror-arm64 | \
+    grep "=> /" | \
+    awk '{print $3}' | \
+    xargs -I '{}' bash -c 'mkdir -p "/go/src/app/deps/$(dirname {})" && cp -v "{}" "/go/src/app/deps/{}"' && \
+    echo "=== Copied Files ===" && \
+    find /go/src/app/deps -type f -exec ls -l {} \;
+
+# Final stage
+FROM --platform=linux/arm64 debian:bookworm-slim
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    libgpgme11 \
+    libbtrfs0 \
+    file
+
+# Copy binary and all dependencies
+COPY --from=builder /go/src/app/kube-mqtt-mirror-arm64 /kube-mqtt-mirror-arm64
+COPY --from=builder /go/src/app/deps/ /
+
+# Verify environment and dependencies
+RUN echo "=== System Information ===" && \
+    uname -a && \
+    echo "=== Library Search Paths ===" && \
+    ldconfig -v 2>/dev/null | grep -v "^$" && \
+    echo "=== Binary Dependencies ===" && \
+    ldd /kube-mqtt-mirror-arm64
+
+# Verify binary and its dependencies
+RUN echo "=== Binary Info in Final Stage ===" && \
+    file /kube-mqtt-mirror-arm64 && \
+    echo "=== Library Dependencies ===" && \
+    ldd /kube-mqtt-mirror-arm64 && \
+    echo "=== Library Files ===" && \
+    ls -l /usr/lib/aarch64-linux-gnu/libgpgme.so* && \
+    ls -l /usr/lib/aarch64-linux-gnu/libbtrfs.so*

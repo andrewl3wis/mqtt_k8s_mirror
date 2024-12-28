@@ -23,26 +23,6 @@ jobs:
         with:
           go-version: '=1.23.4'  # Exact version match
           check-latest: true
-      
-      # Cache Go modules
-      - name: Cache Go modules
-        id: go-mod-cache
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: ${{ runner.os }}-go-amd64-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-amd64-
-
-      # Ensure Go module cache has correct permissions
-      - name: Set Go module cache permissions
-        run: |
-          sudo mkdir -p ~/go/pkg/mod
-          sudo chmod -R 777 ~/go/pkg/mod
-          sudo mkdir -p ~/.cache/go-build
-          sudo chmod -R 777 ~/.cache/go-build
 
       # Set up Docker Buildx
       - name: Set up Docker Buildx
@@ -53,52 +33,6 @@ jobs:
         run: |
           # Create builder instance with cache
           docker buildx create --use --name amd64-builder
-
-          # Create Dockerfile for AMD64 build
-          cat > Dockerfile.amd64 <<EOF
-          # Dependency stage
-          FROM golang:1.23.4-bookworm AS deps
-          
-          # Cache apt packages
-          RUN rm -f /etc/apt/apt.conf.d/docker-clean && \
-              echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache
-          
-          # Install build dependencies with cache
-          RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-              --mount=type=cache,target=/var/lib/apt,sharing=locked \
-              apt-get update && apt-get install -y \
-              libgpgme-dev \
-              libbtrfs-dev \
-              pkg-config \
-              file
-
-          # Cache Go modules with proper permissions
-          WORKDIR /go/src/app
-          COPY go.mod go.sum ./
-          RUN --mount=type=cache,target=/go/pkg/mod \
-              mkdir -p /go/pkg/mod && \
-              chmod -R 777 /go/pkg/mod && \
-              go mod download && \
-              mkdir -p /go/pkg/mod/dario.cat && \
-              chmod -R 777 /go/pkg/mod/dario.cat
-
-          # Build stage
-          FROM deps AS builder
-          WORKDIR /go/src/app
-          
-          COPY . .
-
-          # Build the binary with detailed logging
-          ENV GOTOOLCHAIN=local
-          ENV CGO_ENABLED=1
-          ENV GOARCH=amd64
-          ENV GO111MODULE=on
-          RUN go build -v -o kube-mqtt-mirror-amd64 && \
-              echo "=== Binary Info ===" && \
-              file kube-mqtt-mirror-amd64 && \
-              echo "=== Dependencies ===" && \
-              ldd kube-mqtt-mirror-amd64
-          EOF
 
           # Prepare output directory
           mkdir -p buildx-output
@@ -145,96 +79,6 @@ jobs:
         run: |
           # Create builder instance with cache
           docker buildx create --use --name arm64-builder
-          # Create Dockerfile for ARM64 build with multi-stage build
-          cat > Dockerfile.arm64 <<EOF
-          # Dependency stage
-          FROM --platform=linux/arm64 golang:1.23.4-bookworm AS deps
-          
-          # Cache apt packages
-          RUN rm -f /etc/apt/apt.conf.d/docker-clean && \
-              echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache
-          
-          # Install build dependencies with cache
-          RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-              --mount=type=cache,target=/var/lib/apt,sharing=locked \
-              apt-get update && apt-get install -y \
-              libgpgme-dev \
-              libbtrfs-dev \
-              pkg-config \
-              file
-
-          # Cache Go modules with proper permissions
-          WORKDIR /go/src/app
-          COPY go.mod go.sum ./
-          RUN --mount=type=cache,target=/go/pkg/mod \
-              mkdir -p /go/pkg/mod && \
-              chmod -R 777 /go/pkg/mod && \
-              go mod download && \
-              mkdir -p /go/pkg/mod/dario.cat && \
-              chmod -R 777 /go/pkg/mod/dario.cat
-
-          # Build stage
-          FROM deps AS builder
-          WORKDIR /go/src/app
-          COPY . .
-
-          # Verify Go environment
-          RUN echo "=== Go Environment ===" && \
-              go version && \
-              go env GOARCH GOOS CGO_ENABLED GOTOOLCHAIN
-
-          # Build the binary with detailed logging
-          ENV GOTOOLCHAIN=local
-          ENV CGO_ENABLED=1
-          ENV GOARCH=arm64
-          ENV GO111MODULE=on
-          RUN set -ex && \
-              echo "=== Building with flags ===" && \
-              go env && \
-              go build -v -x -o kube-mqtt-mirror-arm64 2>&1 | tee build.log && \
-              echo "=== Binary Info ===" && \
-              file kube-mqtt-mirror-arm64 && \
-              echo "=== Dependencies ===" && \
-              ldd kube-mqtt-mirror-arm64 && \
-              echo "=== Copying Dependencies ===" && \
-              mkdir -p /go/src/app/deps && \
-              ldd kube-mqtt-mirror-arm64 | \
-              grep "=> /" | \
-              awk '{print $3}' | \
-              xargs -I '{}' bash -c 'mkdir -p "/go/src/app/deps/$(dirname {})" && cp -v "{}" "/go/src/app/deps/{}"' && \
-              echo "=== Copied Files ===" && \
-              find /go/src/app/deps -type f -exec ls -l {} \;
-
-          # Final stage
-          FROM --platform=linux/arm64 debian:bookworm-slim
-
-          # Install runtime dependencies
-          RUN apt-get update && apt-get install -y \
-              libgpgme11 \
-              libbtrfs0 \
-              file
-
-          # Copy binary and all dependencies
-          COPY --from=builder /go/src/app/kube-mqtt-mirror-arm64 /kube-mqtt-mirror-arm64
-          COPY --from=builder /go/src/app/deps/ /
-          
-          # Verify environment and dependencies
-          RUN echo "=== System Information ===" && \
-              uname -a && \
-              echo "=== Library Search Paths ===" && \
-              ldconfig -v 2>/dev/null | grep -v "^$" && \
-              echo "=== Binary Dependencies ===" && \
-              ldd /kube-mqtt-mirror-arm64
-          
-          # Verify binary and its dependencies
-          RUN echo "=== Binary Info in Final Stage ===" && \
-              file /kube-mqtt-mirror-arm64 && \
-              echo "=== Library Dependencies ===" && \
-              ldd /kube-mqtt-mirror-arm64 && \
-              echo "=== Library Files ===" && \
-              ls -l /usr/lib/aarch64-linux-gnu/libgpgme.so* && \
-              ls -l /usr/lib/aarch64-linux-gnu/libbtrfs.so*
-          EOF
 
           # Prepare output directory
           mkdir -p buildx-output
