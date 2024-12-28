@@ -10,7 +10,7 @@ on:
 
 jobs:
   amd64-build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       # Check out the repository
@@ -70,7 +70,7 @@ jobs:
           path: kube-mqtt-mirror-amd64
 
   arm64-build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       # Check out the repository
@@ -140,7 +140,7 @@ jobs:
 
   test:
     needs: [amd64-build]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       # Check out the repository for test files
@@ -255,4 +255,3 @@ jobs:
             echo "Error: Log file kube-mqtt-mirror.log not found"
             exit 1
           fi
-
