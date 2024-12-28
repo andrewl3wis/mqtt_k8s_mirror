@@ -38,6 +38,29 @@ jobs:
         with:
           registry: true
 
+      - name: Verify registry
+        run: |
+          # Wait for registry to be ready
+          echo "Verifying Kind registry..."
+          timeout=30
+          for i in $(seq 1 $timeout); do
+            if docker ps | grep -q 'registry:2'; then
+              echo "Registry container is running"
+              if curl -s http://localhost:5000/v2/ > /dev/null; then
+                echo "Registry API is accessible"
+                break
+              fi
+            fi
+            if [ $i -eq $timeout ]; then
+              echo "Registry failed to start:"
+              docker ps
+              docker logs $(docker ps -q --filter ancestor=registry:2)
+              exit 1
+            fi
+            echo "Waiting for registry ($i/$timeout)..."
+            sleep 1
+          done
+
       - name: Install tools
         run: |
           sudo apt-get update
@@ -68,7 +91,7 @@ jobs:
           # Create log file
           touch kube-mqtt-mirror.log
 
-          # Start the program
+          # Start the program with debug logging
           ./kube-mqtt-mirror \
             -webhook \
             -mirror \
@@ -79,7 +102,8 @@ jobs:
             -insecure-registries \
             -tls-cert server.crt \
             -tls-key server.key \
-            -log-file kube-mqtt-mirror.log &
+            -log-file kube-mqtt-mirror.log \
+            -v=4 &
           MIRROR_PID=$!
 
           # Show program output in real time
@@ -132,6 +156,25 @@ jobs:
           
           kubectl apply -f webhook.yaml
 
+          # Wait for local registry to be ready
+          echo "Waiting for local registry..."
+          timeout=30
+          registry_ready=false
+          for i in $(seq 1 $timeout); do
+            if curl -s http://localhost:5000/v2/ > /dev/null; then
+              echo "Local registry is ready"
+              registry_ready=true
+              break
+            fi
+            echo "Waiting for registry ($i/$timeout)..."
+            sleep 1
+          done
+
+          if [ "$registry_ready" != "true" ]; then
+            echo "Local registry failed to start"
+            exit 1
+          fi
+
           # Create test pod
           kubectl apply -f - <<EOF
           apiVersion: v1
@@ -151,18 +194,27 @@ jobs:
           timeout=60
           copied=false
           for i in $(seq 1 $timeout); do
-            if grep -q "Image copy completed successfully" kube-mqtt-mirror.log; then
+            if grep -q "Multi-arch image copy completed successfully" kube-mqtt-mirror.log; then
               echo "Image copy completed successfully"
               copied=true
               break
+            elif grep -q "Single-arch image copy completed successfully" kube-mqtt-mirror.log; then
+              echo "Image copy completed successfully"
+              copied=true
+              break
+            elif grep -q "Failed to" kube-mqtt-mirror.log; then
+              echo "Image copy failed with error:"
+              grep "Failed to" kube-mqtt-mirror.log
+              exit 1
             fi
             echo "Waiting for image copy ($i/$timeout)..."
             sleep 1
           done
 
           if [ "$copied" != "true" ]; then
-            echo "Image copy failed"
-            cat kube-mqtt-mirror.log
+            echo "Image copy timed out after ${timeout} seconds"
+            echo "Last 20 lines of log:"
+            tail -n 20 kube-mqtt-mirror.log
             exit 1
           fi
 
