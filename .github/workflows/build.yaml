@@ -227,7 +227,7 @@ jobs:
 
           # Verify multi-arch support
           echo "Verifying multi-arch support for nginx image..."
-          MANIFEST_LIST=$(curl -s -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" http://localhost:5000/v2/nginx/manifests/latest)
+          MANIFEST_LIST=$(curl -s -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.index.v1+json" http://localhost:5000/v2/nginx/manifests/latest)
           if [ $? -ne 0 ]; then
             echo "Failed to get manifest list"
             exit 1
