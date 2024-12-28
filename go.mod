@@ -1,4 +1,4 @@
-module mqtt_k8s_mirror
+module kube-mqtt-mirror
 
 go 1.23.4
 

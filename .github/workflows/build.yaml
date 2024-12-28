@@ -57,15 +57,15 @@ jobs:
       - name: Build Go binaries
         run: |
           # Build for AMD64
-          GOARCH=amd64 go build -o combined_mirror-amd64
-          echo "Built AMD64 binary: combined_mirror-amd64"
+          GOARCH=amd64 go build -o kube-mqtt-mirror-amd64
+          echo "Built AMD64 binary: kube-mqtt-mirror-amd64"
           
           # Build for ARM64
-          GOARCH=arm64 go build -o combined_mirror-arm64
-          echo "Built ARM64 binary: combined_mirror-arm64"
+          GOARCH=arm64 go build -o kube-mqtt-mirror-arm64
+          echo "Built ARM64 binary: kube-mqtt-mirror-arm64"
           
           # Create a symbolic link to amd64 version as default for testing
-          ln -s combined_mirror-amd64 combined_mirror
+          ln -s kube-mqtt-mirror-amd64 kube-mqtt-mirror
 
       # Generate self-signed TLS certificates
       - name: Generate TLS certificates
@@ -94,7 +94,7 @@ jobs:
       - name: Deploy and test
         run: |
           # Start the program in the background with new configuration
-          ./combined_mirror \
+          ./kube-mqtt-mirror \
             --webhook \
             --mirror \
             --mqtt-broker tcp://localhost:1883 \
@@ -102,7 +102,7 @@ jobs:
             --insecure-registries \
             --tls-cert server.crt \
             --tls-key server.key \
-            --log-file combined_mirror.log &
+            --log-file kube-mqtt-mirror.log &
           PROGRAM_PID=$!
           
           CA_BUNDLE=$(cat server.crt | base64 | tr -d '\n')
@@ -151,11 +151,11 @@ jobs:
           sleep 5
           
           # Check if log file exists and show contents
-          if [ -f combined_mirror.log ]; then
+          if [ -f kube-mqtt-mirror.log ]; then
             echo "=== Program Logs ==="
-            cat combined_mirror.log
+            cat kube-mqtt-mirror.log
           else
-            echo "Error: Log file combined_mirror.log not found"
+            echo "Error: Log file kube-mqtt-mirror.log not found"
             exit 1
           fi
 
