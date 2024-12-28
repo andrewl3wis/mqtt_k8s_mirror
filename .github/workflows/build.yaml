@@ -153,6 +153,7 @@ jobs:
         timeout-minutes: 5
         run: |
           # Start the program in the background with process management
+          # Start program with logging
           ./kube-mqtt-mirror \
             --webhook \
             --mirror \
@@ -162,6 +163,22 @@ jobs:
             --tls-cert server.crt \
             --tls-key server.key \
             --log-file kube-mqtt-mirror.log & MIRROR_PID=$!
+
+          # Wait a moment for logging to initialize
+          sleep 2
+          echo "=== Initial Program Logs ==="
+          cat kube-mqtt-mirror.log
+
+          # Set up log monitoring
+          tail -f kube-mqtt-mirror.log &
+          LOG_PID=$!
+
+          # Function to stop log monitoring
+          stop_log_monitoring() {
+            if [ -n "$LOG_PID" ]; then
+              kill $LOG_PID 2>/dev/null || true
+            fi
+          }
           
           # Function to handle process cleanup
           cleanup_process() {
@@ -300,8 +317,10 @@ jobs:
           kubectl apply -f webhook.yaml
 
           # Show initial registry state
-          echo "=== Initial Registry State ==="
-          curl -s http://localhost:5000/v2/_catalog
+          echo -e "\n=== Initial Registry State ==="
+          curl -v http://localhost:5000/v2/_catalog || true
+          echo -e "\nRegistry API Status:"
+          curl -v http://localhost:5000/v2/ || true
           
           # Create test pod and monitor image pull
           echo "Creating test pod..."
@@ -323,6 +342,17 @@ jobs:
           kubectl get events --watch --field-selector involvedObject.name=webhook-test-pod &
           EVENTS_PID=$!
 
+          # Monitor mirroring progress
+          echo "Monitoring mirroring progress..."
+          for i in {1..6}; do
+            echo -e "\n=== Registry State (Check $i) ==="
+            curl -v http://localhost:5000/v2/_catalog || true
+            echo -e "\n=== Current Program Logs ==="
+            cat kube-mqtt-mirror.log
+            echo -e "\nWaiting 10 seconds..."
+            sleep 10
+          done
+
           # Wait for pod to be ready
           if ! kubectl wait --for=condition=ready pod/webhook-test-pod --timeout=60s; then
             echo "Pod creation failed"
@@ -334,8 +364,9 @@ jobs:
             exit 1
           fi
 
-          # Stop watching events
+          # Stop watching events and logs
           kill $EVENTS_PID
+          stop_log_monitoring
 
           # Show final pod status
           echo "=== Final Pod Status ==="
@@ -343,18 +374,29 @@ jobs:
           echo "=== Pod Description ==="
           kubectl describe pod webhook-test-pod
 
-          # Show registry contents
-          echo "=== Registry Contents ==="
-          curl -s http://localhost:5000/v2/_catalog
+          # Show registry contents with debug info
+          echo -e "\n=== Registry Contents ==="
+          curl -v http://localhost:5000/v2/_catalog || true
           
-          # Show image details for nginx
-          echo "=== Image Tags ==="
-          curl -s http://localhost:5000/v2/nginx/tags/list
+          # Show image details for nginx with debug info
+          echo -e "\n=== Image Tags ==="
+          curl -v http://localhost:5000/v2/nginx/tags/list || true
           
-          # Show image manifest
-          echo "=== Image Manifest ==="
-          DIGEST=$(curl -s -H "Accept: application/vnd.docker.distribution.manifest.v2+json" http://localhost:5000/v2/nginx/manifests/latest | jq -r '.config.digest')
-          curl -s -L -H "Accept: application/vnd.docker.container.image.v1+json" http://localhost:5000/v2/nginx/blobs/$DIGEST | jq .
+          # Show image manifest with debug info
+          echo -e "\n=== Image Manifest ==="
+          echo "Getting manifest..."
+          MANIFEST=$(curl -v -H "Accept: application/vnd.docker.distribution.manifest.v2+json" http://localhost:5000/v2/nginx/manifests/latest)
+          echo "Manifest response: $MANIFEST"
+          
+          if [ -n "$MANIFEST" ]; then
+            DIGEST=$(echo "$MANIFEST" | jq -r '.config.digest')
+            echo "Digest: $DIGEST"
+            
+            if [ -n "$DIGEST" ] && [ "$DIGEST" != "null" ]; then
+              echo "Getting blob..."
+              curl -v -L -H "Accept: application/vnd.docker.container.image.v1+json" http://localhost:5000/v2/nginx/blobs/$DIGEST | jq . || true
+            fi
+          fi
           
           # Show container image details
           echo "=== Container Image ==="
