@@ -9,7 +9,7 @@ on:
       - main
 
 jobs:
-  test:
+  amd64-build:
     runs-on: ubuntu-latest
 
     steps:
@@ -35,7 +35,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-
 
-      # Install system dependencies
+      # Install system dependencies for AMD64
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -43,8 +43,7 @@ jobs:
             libgpgme-dev \
             btrfs-progs \
             libbtrfs-dev \
-            pkg-config \
-            mosquitto
+            pkg-config
 
       # Add dependencies and tidy
       - name: Add dependencies
@@ -53,19 +52,119 @@ jobs:
           go get github.com/eclipse/paho.mqtt.golang
           go mod tidy
 
-      # Build the Go binaries for multiple architectures
-      - name: Build Go binaries
+      # Build the Go binary for AMD64
+      - name: Build AMD64 binary
         run: |
           # Build for AMD64
-          GOARCH=amd64 go build -o kube-mqtt-mirror-amd64
+          CGO_ENABLED=1 GOARCH=amd64 go build -v -x -o kube-mqtt-mirror-amd64
           echo "Built AMD64 binary: kube-mqtt-mirror-amd64"
-          
-          # Build for ARM64
-          GOARCH=arm64 go build -o kube-mqtt-mirror-arm64
-          echo "Built ARM64 binary: kube-mqtt-mirror-arm64"
           
           # Create a symbolic link to amd64 version as default for testing
           ln -s kube-mqtt-mirror-amd64 kube-mqtt-mirror
+
+      # Upload AMD64 binary as artifact
+      - name: Upload AMD64 binary
+        uses: actions/upload-artifact@v3
+        with:
+          name: kube-mqtt-mirror-amd64
+          path: kube-mqtt-mirror-amd64
+
+  arm64-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Check out the repository
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      # Set up Go
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.22'
+      
+      # Cache Go modules
+      - name: Cache Go modules
+        id: go-mod-cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      # Install system dependencies for ARM64
+      - name: Install system dependencies
+        run: |
+          sudo dpkg --add-architecture arm64
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgpgme-dev:arm64 \
+            libbtrfs-dev:arm64 \
+            pkg-config \
+            gpgme-config:arm64 \
+            gcc-aarch64-linux-gnu
+
+          # Ensure pkg-config can find ARM64 gpgme
+          sudo cp /usr/lib/aarch64-linux-gnu/pkgconfig/gpgme*.pc /usr/lib/pkgconfig/ || true
+
+      # Add dependencies and tidy
+      - name: Add dependencies
+        run: |
+          go get github.com/containers/image/v5/copy
+          go get github.com/eclipse/paho.mqtt.golang
+          go mod tidy
+
+      # Build the Go binary for ARM64
+      - name: Build ARM64 binary
+        run: |
+          # Debug output
+          echo "=== Checking pkg-config and library paths ==="
+          echo "ARM64 pkg-config for gpgme:"
+          PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig pkg-config --libs --cflags gpgme || true
+          echo "Available .pc files:"
+          find /usr -name "gpgme*.pc" || true
+          
+          # Build for ARM64 with proper CGO settings
+          CGO_ENABLED=1 GOARCH=arm64 CC=aarch64-linux-gnu-gcc PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig go build -v -x -o kube-mqtt-mirror-arm64
+          echo "Built ARM64 binary: kube-mqtt-mirror-arm64"
+
+      # Upload ARM64 binary as artifact
+      - name: Upload ARM64 binary
+        uses: actions/upload-artifact@v3
+        with:
+          name: kube-mqtt-mirror-arm64
+          path: kube-mqtt-mirror-arm64
+
+  test:
+    needs: [amd64-build, arm64-build]
+    runs-on: ubuntu-latest
+
+    steps:
+      # Check out the repository for test files
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      # Download AMD64 binary
+      - name: Download AMD64 binary
+        uses: actions/download-artifact@v3
+        with:
+          name: kube-mqtt-mirror-amd64
+
+      # Make binary executable
+      - name: Make binary executable
+        run: |
+          chmod +x kube-mqtt-mirror-amd64
+          ln -s kube-mqtt-mirror-amd64 kube-mqtt-mirror
+
+      # Install minimal runtime dependencies
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            mosquitto
 
       # Generate self-signed TLS certificates
       - name: Generate TLS certificates
@@ -89,7 +188,6 @@ jobs:
           registry_port: 5000
           registry_enable_delete: true
 
-
       # Deploy the program and test it
       - name: Deploy and test
         run: |
@@ -102,8 +200,7 @@ jobs:
             --insecure-registries \
             --tls-cert server.crt \
             --tls-key server.key \
-            --log-file kube-mqtt-mirror.log &
-          PROGRAM_PID=$!
+            --log-file kube-mqtt-mirror.log
           
           CA_BUNDLE=$(cat server.crt | base64 | tr -d '\n')
           # Wait for the program to start
@@ -159,5 +256,3 @@ jobs:
             exit 1
           fi
 
-          # # Clean up
-          # kill $PROGRAM_PID
