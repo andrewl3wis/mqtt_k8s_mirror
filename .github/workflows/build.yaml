@@ -36,11 +36,19 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-amd64-
 
+      # Ensure Go module cache has correct permissions
+      - name: Set Go module cache permissions
+        run: |
+          sudo mkdir -p ~/go/pkg/mod
+          sudo chmod -R 777 ~/go/pkg/mod
+          sudo mkdir -p ~/.cache/go-build
+          sudo chmod -R 777 ~/.cache/go-build
+
       # Set up Docker Buildx
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Set up Docker cache
+      # Set up Docker cache with proper permissions
       - name: Set up Docker cache
         uses: actions/cache@v3
         with:
@@ -48,6 +56,11 @@ jobs:
           key: ${{ runner.os }}-buildx-amd64-${{ hashFiles('**/go.mod', '**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-buildx-amd64-
+
+      - name: Prepare buildx cache directory
+        run: |
+          sudo mkdir -p /tmp/.buildx-cache
+          sudo chmod -R 777 /tmp/.buildx-cache
 
       # Build AMD64 binary in Docker
       - name: Build AMD64 binary
@@ -73,10 +86,12 @@ jobs:
               pkg-config \
               file
 
-          # Cache Go modules
+          # Cache Go modules with proper permissions
           WORKDIR /go/src/app
           COPY go.mod go.sum ./
           RUN --mount=type=cache,target=/go/pkg/mod \
+              mkdir -p /go/pkg/mod && \
+              chmod 777 /go/pkg/mod && \
               go mod download
 
           # Build stage
@@ -134,7 +149,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Set up Docker cache
+      # Set up Docker cache with proper permissions
       - name: Set up Docker cache
         uses: actions/cache@v3
         with:
@@ -142,6 +157,11 @@ jobs:
           key: ${{ runner.os }}-buildx-${{ hashFiles('**/go.mod', '**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-buildx-
+
+      - name: Prepare buildx cache directory
+        run: |
+          sudo mkdir -p /tmp/.buildx-cache
+          sudo chmod -R 777 /tmp/.buildx-cache
 
       - name: Build ARM64 binary in Docker
         run: |
@@ -165,10 +185,12 @@ jobs:
               pkg-config \
               file
 
-          # Cache Go modules
+          # Cache Go modules with proper permissions
           WORKDIR /go/src/app
           COPY go.mod go.sum ./
           RUN --mount=type=cache,target=/go/pkg/mod \
+              mkdir -p /go/pkg/mod && \
+              chmod 777 /go/pkg/mod && \
               go mod download
 
           # Build stage
