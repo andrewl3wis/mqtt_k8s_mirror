@@ -12,18 +12,14 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - name: Set up Go
-        uses: actions/setup-go@v4
+      - uses: actions/setup-go@v4
         with:
           go-version: '1.21'
 
       - name: Build binary
-        run: |
-          CGO_ENABLED=0 go build -o kube-mqtt-mirror .
-          chmod +x kube-mqtt-mirror
+        run: CGO_ENABLED=0 go build -o kube-mqtt-mirror .
 
-      - name: Upload binary
-        uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v3
         with:
           name: kube-mqtt-mirror
           path: kube-mqtt-mirror
@@ -32,124 +28,50 @@ jobs:
   test:
     needs: build
     runs-on: ubuntu-22.04
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
+      postgres:
+        image: postgres:14-alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     strategy:
       matrix:
         messaging: [sqlite, mqtt, postgres]
     steps:
       - uses: actions/checkout@v3
 
-      - name: Download binary
-        uses: actions/download-artifact@v3
+      - uses: actions/download-artifact@v3
         with:
           name: kube-mqtt-mirror
-          
+
       - name: Make binary executable
         run: chmod +x kube-mqtt-mirror
 
-      - name: Install kubectl
-        uses: azure/setup-kubectl@v3
-        with:
-          version: 'latest'
-
-      - name: Install kind
-        run: |
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
-          chmod +x ./kind
-          sudo mv ./kind /usr/local/bin/kind
-
-      - name: Create kind cluster
-        uses: helm/kind-action@v1.12.0
-        with:
-          registry: true
-
-      - name: Verify registry
-        run: |
-          # Wait for registry to be ready
-          echo "Verifying Kind registry..."
-          timeout=30
-          for i in $(seq 1 $timeout); do
-            if docker ps | grep -q 'registry:2'; then
-              echo "Registry container is running"
-              if curl -s http://localhost:5000/v2/ > /dev/null; then
-                echo "Registry API is accessible"
-                break
-              fi
-            fi
-            if [ $i -eq $timeout ]; then
-              echo "Registry failed to start:"
-              docker ps
-              docker logs $(docker ps -q --filter ancestor=registry:2)
-              exit 1
-            fi
-            echo "Waiting for registry ($i/$timeout)..."
-            sleep 1
-          done
-
-      - name: Install tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y iproute2
-
-      - name: Generate TLS certificates
-        run: |
-          # Get Docker host IP
-          DOCKER_HOST_IP=$(ip -4 addr show docker0 | grep -Po 'inet \K[\d.]+')
-          echo "Using Docker host IP: $DOCKER_HOST_IP"
-
-          # Generate certs with Docker host IP
-          openssl req -x509 -newkey rsa:2048 \
-            -keyout server.key \
-            -out server.crt \
-            -days 365 \
-            -nodes \
-            -subj "/CN=localhost" \
-            -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:$DOCKER_HOST_IP"
-          chmod 600 server.key server.crt
-
-      - name: Setup MQTT (if needed)
+      - name: Setup MQTT
         if: matrix.messaging == 'mqtt'
         run: |
-          # Install Mosquitto
           sudo apt-get update
           sudo apt-get install -y mosquitto
-          
-          # Configure Mosquitto for testing
           echo "listener 1883" | sudo tee /etc/mosquitto/conf.d/test.conf
           echo "allow_anonymous true" | sudo tee -a /etc/mosquitto/conf.d/test.conf
-          
-          # Start Mosquitto
           sudo systemctl start mosquitto
-          echo "MQTT broker started on port 1883"
-          echo "MQTT broker started on port 1883"
 
-      - name: Setup Postgres (if needed)
+      - name: Setup Postgres Table
         if: matrix.messaging == 'postgres'
         run: |
-          # Start PostgreSQL
-          docker run -d --name postgres \
-            -e POSTGRES_USER=test \
-            -e POSTGRES_PASSWORD=test \
-            -e POSTGRES_DB=test \
-            -p 5432:5432 \
-            postgres:14-alpine
-
-          # Wait for PostgreSQL to be ready
-          timeout=30
-          for i in $(seq 1 $timeout); do
-            if docker exec postgres pg_isready -U test > /dev/null 2>&1; then
-              echo "PostgreSQL is ready"
-              break
-            fi
-            if [ $i -eq $timeout ]; then
-              echo "PostgreSQL failed to start"
-              exit 1
-            fi
-            echo "Waiting for PostgreSQL ($i/$timeout)..."
-            sleep 1
-          done
-
-          # Create required table
-          docker exec postgres psql -U test -d test -c "
+          PGPASSWORD=test psql -h localhost -U test -d test -c "
             CREATE TABLE IF NOT EXISTS messages (
               id SERIAL PRIMARY KEY,
               topic TEXT NOT NULL,
@@ -157,32 +79,30 @@ jobs:
               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );"
 
-      - name: Run Kind Test
+      - name: Generate TLS Certificate
         run: |
-          # Get Docker host IP
-          DOCKER_HOST_IP=$(ip -4 addr show docker0 | grep -Po 'inet \K[\d.]+')
-          echo "Using Docker host IP: $DOCKER_HOST_IP"
+          openssl req -x509 -newkey rsa:2048 \
+            -keyout server.key \
+            -out server.crt \
+            -days 365 \
+            -nodes \
+            -subj "/CN=localhost" \
+            -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+          chmod 600 server.key server.crt
 
-          # Create log file
-          touch kube-mqtt-mirror.log
-
-          # Configure messaging settings based on type
+      - name: Start Program
+        run: |
           BROKER_ADDR=""
           EXTRA_ARGS=""
           case "${{ matrix.messaging }}" in
-            "sqlite")
-              BROKER_ADDR="test.db"
-              ;;
-            "mqtt")
-              BROKER_ADDR="tcp://localhost:1883"
-              ;;
-            "postgres")
+            "sqlite") BROKER_ADDR="test.db" ;;
+            "mqtt") BROKER_ADDR="tcp://localhost:1883" ;;
+            "postgres") 
               BROKER_ADDR="localhost:5432"
               EXTRA_ARGS="-username test -password test"
               ;;
           esac
 
-          # Start the program
           ./kube-mqtt-mirror \
             -webhook \
             -mirror \
@@ -195,372 +115,137 @@ jobs:
             -tls-cert server.crt \
             -tls-key server.key \
             -log-file kube-mqtt-mirror.log &
-          MIRROR_PID=$!
-
-          # Show program output in real time
-          tail -f kube-mqtt-mirror.log &
-          TAIL_PID=$!
-
-          # Wait for program to start
-          timeout=30
-          started=false
-          for i in $(seq 1 $timeout); do
-            if grep -q "Subscribed to topic: image/download" kube-mqtt-mirror.log; then
-              echo "Program started successfully"
-              started=true
-              break
-            fi
-            echo "Waiting for program to start ($i/$timeout)..."
-            sleep 1
-          done
-
-          # Stop tailing the log
-          kill $TAIL_PID || true
-
-          if [ "$started" != "true" ]; then
-            echo "Program failed to start"
-            cat kube-mqtt-mirror.log
-            exit 1
-          fi
-
-          # Configure webhook
-          CA_BUNDLE=$(cat server.crt | base64 | tr -d '\n')
-          cat > webhook.yaml <<EOF
-          apiVersion: admissionregistration.k8s.io/v1
-          kind: MutatingWebhookConfiguration
-          metadata:
-            name: webhook-mirroring
-          webhooks:
-            - name: webhook.mirroring.example.com
-              admissionReviewVersions: ["v1"]
-              sideEffects: None
-              rules:
-                - operations: ["CREATE"]
-                  apiGroups: [""]
-                  apiVersions: ["v1"]
-                  resources: ["pods"]
-              clientConfig:
-                url: "https://$DOCKER_HOST_IP:8443/webhook"
-                caBundle: $CA_BUNDLE
-              failurePolicy: Fail
-          EOF
           
-          kubectl apply -f webhook.yaml
-
-          # Wait for local registry to be ready
-          echo "Waiting for local registry..."
           timeout=30
-          registry_ready=false
-          for i in $(seq 1 $timeout); do
-            if curl -s http://localhost:5000/v2/ > /dev/null; then
-              echo "Local registry is ready"
-              registry_ready=true
-              break
-            fi
-            echo "Waiting for registry ($i/$timeout)..."
-            sleep 1
-          done
-
-          if [ "$registry_ready" != "true" ]; then
-            echo "Local registry failed to start"
-            exit 1
-          fi
-
-          # For distributed backends (MQTT and Postgres), start multiple instances
-          if [ "${{ matrix.messaging }}" = "mqtt" ] || [ "${{ matrix.messaging }}" = "postgres" ]; then
-            echo "Starting multiple mirror instances..."
-            
-            # Verify messaging system
-            case "${{ matrix.messaging }}" in
-              "mqtt")
-                echo "Verifying MQTT broker..."
-                timeout=30
-                mqtt_ready=false
-                for i in $(seq 1 $timeout); do
-                  if sudo systemctl status mosquitto | grep -q "active (running)"; then
-                    echo "MQTT broker is running"
-                    mqtt_ready=true
-                    break
-                  fi
-                  echo "Waiting for MQTT broker ($i/$timeout)..."
-                  sleep 1
-                done
-                if [ "$mqtt_ready" != "true" ]; then
-                  echo "MQTT broker failed to start"
-                  sudo systemctl status mosquitto
-                  exit 1
-                fi
-
-                # Test MQTT pub/sub
-                echo "Testing MQTT pub/sub..."
-                sudo apt-get install -y mosquitto-clients
-                mosquitto_sub -t test/topic -C 1 > mqtt_test.txt &
-                SUB_PID=$!
-                sleep 1
-                mosquitto_pub -t test/topic -m "test message"
-                wait $SUB_PID
-                if ! grep -q "test message" mqtt_test.txt; then
-                  echo "MQTT pub/sub test failed"
-                  exit 1
-                fi
-                echo "MQTT pub/sub test successful"
-                rm mqtt_test.txt
-                ;;
-
-              "postgres")
-                echo "Verifying Postgres..."
-                timeout=30
-                pg_ready=false
-                for i in $(seq 1 $timeout); do
-                  if docker exec postgres pg_isready -U test > /dev/null 2>&1; then
-                    echo "Postgres is running"
-                    pg_ready=true
-                    break
-                  fi
-                  echo "Waiting for Postgres ($i/$timeout)..."
-                  sleep 1
-                done
-                if [ "$pg_ready" != "true" ]; then
-                  echo "Postgres failed to start"
-                  docker logs postgres
-                  exit 1
-                fi
-
-                # Test Postgres notifications
-                echo "Testing Postgres notifications..."
-                docker exec postgres psql -U test -d test -c "LISTEN test_channel; NOTIFY test_channel, 'test';" &
-                LISTEN_PID=$!
-                sleep 1
-                docker exec postgres psql -U test -d test -c "NOTIFY test_channel, 'test';"
-                wait $LISTEN_PID
-                if [ $? -ne 0 ]; then
-                  echo "Postgres notification test failed"
-                  exit 1
-                fi
-                echo "Postgres notification test successful"
-                ;;
-            esac
-
-            echo "Starting mirror instances..."
-            for i in {1..3}; do
-              ./kube-mqtt-mirror \
-                -mirror \
-                -messaging-type ${{ matrix.messaging }} \
-                -broker "$BROKER_ADDR" \
-                $EXTRA_ARGS \
-                -local-registry localhost:5000 \
-                -insecure-registries \
-                -log-file "mirror$i.log" &
-              MIRROR_PIDS="$MIRROR_PIDS $!"
-            done
-
-            # Wait for all instances to be ready
-            for i in {1..3}; do
-              timeout=30
-              started=false
-              for j in $(seq 1 $timeout); do
-                if grep -q "Subscribed to topic: image/download" "mirror$i.log"; then
-                  echo "Mirror instance $i started successfully"
-                  started=true
-                  break
-                fi
-                sleep 1
-              done
-              if [ "$started" != "true" ]; then
-                echo "Mirror instance $i failed to start"
-                cat "mirror$i.log"
-                exit 1
-              fi
-            done
-          fi
-
-          # Test concurrent pod creation with different images
-          echo "Testing concurrent pod creation..."
-          IMAGES=("nginx:alpine" "busybox:latest" "redis:alpine" "memcached:alpine" "postgres:alpine")
-          
-          # Create all deployments concurrently
-          echo "Creating deployments concurrently..."
-          for img in "${IMAGES[@]}"; do
-            echo "Creating deployment for $img..."
-            kubectl create deployment "test-pod-${img/:/-}" --image="$img"
-            kubectl patch deployment "test-pod-${img/:/-}" --type=json -p='[{"op": "add", "path": "/spec/template/metadata/annotations", "value": {"webhook": "true"}}]' &
-          done
-
-          # Wait for all webhooks to be received
-          echo "Waiting for webhooks to be received..."
-          timeout=60
-          all_received=false
-          for i in $(seq 1 $timeout); do
-            received_count=0
-            for img in "${IMAGES[@]}"; do
-              if grep -q "Detected webhook pod with image: $img" kube-mqtt-mirror.log; then
-                ((received_count++))
-              fi
-            done
-            if [ "$received_count" -eq "${#IMAGES[@]}" ]; then
-              all_received=true
-              break
-            fi
-            echo "Waiting for webhooks ($i/$timeout)... $received_count/${#IMAGES[@]} received"
-            sleep 1
-          done
-
-          if [ "$all_received" != "true" ]; then
-            echo "Not all webhooks were received"
-            echo "Webhook log:"
-            cat kube-mqtt-mirror.log
-            exit 1
-          fi
-
-          # Wait for all messages to be published
-          echo "Waiting for messages to be published..."
-          timeout=60
-          all_published=false
-          for i in $(seq 1 $timeout); do
-            published_count=0
-            for img in "${IMAGES[@]}"; do
-              if grep -q "Published image: $img" kube-mqtt-mirror.log; then
-                ((published_count++))
-              fi
-            done
-            if [ "$published_count" -eq "${#IMAGES[@]}" ]; then
-              all_published=true
-              break
-            fi
-            echo "Waiting for messages ($i/$timeout)... $published_count/${#IMAGES[@]} published"
-            sleep 1
-          done
-
-          if [ "$all_published" != "true" ]; then
-            echo "Not all messages were published"
-            echo "Webhook log:"
-            cat kube-mqtt-mirror.log
-            exit 1
-          fi
-
-          # Wait for all images to be processed
-          echo "Waiting for concurrent image copies..."
-          timeout=120
-          declare -A image_status
-          declare -A image_handler
-          for img in "${IMAGES[@]}"; do
-            image_status[$img]="pending"
-          done
-
-          for i in $(seq 1 $timeout); do
-            copied_count=0
-            for img in "${IMAGES[@]}"; do
-              if [ "${image_status[$img]}" = "completed" ]; then
-                ((copied_count++))
-                continue
-              fi
-
-              # Check for download start
-              if [ "${{ matrix.messaging }}" = "mqtt" ] || [ "${{ matrix.messaging }}" = "postgres" ]; then
-                for log in mirror*.log kube-mqtt-mirror.log; do
-                  if grep -q "Starting image copy from $img" "$log" && [ "${image_status[$img]}" = "pending" ]; then
-                    echo "[$img] Download started by ${log%.log}"
-                    image_status[$img]="downloading"
-                    image_handler[$img]="${log%.log}"
-                  fi
-                done
-              else
-                if grep -q "Starting image copy from $img" kube-mqtt-mirror.log && [ "${image_status[$img]}" = "pending" ]; then
-                  echo "[$img] Download started by main instance"
-                  image_status[$img]="downloading"
-                  image_handler[$img]="main"
-                fi
-              fi
-
-              # Check for download completion
-              if [ "${image_status[$img]}" = "downloading" ]; then
-                handler_log="${image_handler[$img]}"
-                if [ "$handler_log" = "main" ]; then
-                  handler_log="kube-mqtt-mirror"
-                fi
-                if grep -q "Successfully downloaded image: $img" "$handler_log.log"; then
-                  echo "[$img] Download completed by ${image_handler[$img]}"
-                  image_status[$img]="completed"
-                  ((copied_count++))
-                elif grep -q "Failed to download image: $img" "$handler_log.log"; then
-                  echo "[$img] Download failed on ${image_handler[$img]}:"
-                  grep -A 5 "Failed to download image: $img" "$handler_log.log"
-                  exit 1
-                fi
-              fi
-            done
-
-            if [ "$copied_count" -eq "${#IMAGES[@]}" ]; then
-              break
-            fi
-
-            # Show detailed status
-            echo "=== Download Status ($i/$timeout) ==="
-            for img in "${IMAGES[@]}"; do
-              case "${image_status[$img]}" in
-                "pending") echo "[$img] Waiting to start" ;;
-                "downloading") echo "[$img] In progress on ${image_handler[$img]}" ;;
-                "completed") echo "[$img] Completed by ${image_handler[$img]}" ;;
-              esac
-            done
-            sleep 1
-          done
-
-          # Check final status
-          failed=false
-          echo "=== Final Status ==="
-          for img in "${IMAGES[@]}"; do
-            if [ "${image_status[$img]}" != "completed" ]; then
-              echo "[$img] Failed to complete within timeout"
-              failed=true
-            else
-              echo "[$img] Successfully handled by ${image_handler[$img]}"
-            fi
-          done
-
-          if [ "$failed" = "true" ]; then
-            echo "=== Main Instance Log ==="
-            cat kube-mqtt-mirror.log
-            if [ "${{ matrix.messaging }}" = "mqtt" ] || [ "${{ matrix.messaging }}" = "postgres" ]; then
-              echo "=== Mirror Instance Logs ==="
-              cat mirror*.log
-            fi
-            exit 1
-          fi
-
-          # Wait for all pods to be ready
-          for img in "${IMAGES[@]}"; do
-            if ! kubectl wait --for=condition=ready deployment/test-pod-${img/:/-} --timeout=60s; then
-              echo "Deployment failed for $img"
-              kubectl describe deployment test-pod-${img/:/-}
+          while ! grep -q "Subscribed to topic: image/download" kube-mqtt-mirror.log; do
+            if [ $timeout -le 0 ]; then
+              echo "Program failed to start"
+              cat kube-mqtt-mirror.log
               exit 1
             fi
+            sleep 1
+            ((timeout--))
           done
 
-          # Cleanup test deployments
-          for img in "${IMAGES[@]}"; do
-            kubectl delete deployment test-pod-${img/:/-} || true
-          done
-
-          # Cleanup
-          kill $MIRROR_PID || true
-          if [ "${{ matrix.messaging }}" = "mqtt" ] || [ "${{ matrix.messaging }}" = "postgres" ]; then
-            for pid in $MIRROR_PIDS; do
-              kill $pid || true
-            done
-            rm -f mirror*.log
-          fi
-          kubectl delete -f webhook.yaml
-
-      - name: Cleanup Services
-        if: always()
+      - name: Test Webhooks
         run: |
-          case "${{ matrix.messaging }}" in
-            "postgres")
-              docker rm -f postgres || true
-              ;;
-            "mqtt")
-              sudo systemctl stop mosquitto || true
-              sudo rm -f /etc/mosquitto/conf.d/test.conf || true
-              ;;
-          esac
+          # Test multi-container pod
+          echo "Testing multi-container pod..."
+          curl -s -k -H "Content-Type: application/json" -d '{
+            "kind": "AdmissionReview",
+            "apiVersion": "admission.k8s.io/v1",
+            "request": {
+              "uid": "test1",
+              "kind": {"group": "", "version": "v1", "kind": "Pod"},
+              "resource": {"group": "", "version": "v1", "resource": "pods"},
+              "operation": "CREATE",
+              "object": {
+                "apiVersion": "v1",
+                "kind": "Pod",
+                "metadata": {
+                  "name": "test-pod-1",
+                  "annotations": {
+                    "webhook": "true"
+                  }
+                },
+                "spec": {
+                  "containers": [
+                    {
+                      "name": "web",
+                      "image": "nginx:alpine"
+                    },
+                    {
+                      "name": "cache",
+                      "image": "redis:alpine"
+                    },
+                    {
+                      "name": "db",
+                      "image": "postgres:alpine"
+                    }
+                  ]
+                }
+              }
+            }
+          }' https://localhost:8443/webhook &
+
+          # Test concurrent pods
+          echo "Testing concurrent pods..."
+          curl -s -k -H "Content-Type: application/json" -d '{
+            "kind": "AdmissionReview",
+            "apiVersion": "admission.k8s.io/v1",
+            "request": {
+              "uid": "test2",
+              "kind": {"group": "", "version": "v1", "kind": "Pod"},
+              "resource": {"group": "", "version": "v1", "resource": "pods"},
+              "operation": "CREATE",
+              "object": {
+                "apiVersion": "v1",
+                "kind": "Pod",
+                "metadata": {
+                  "name": "test-pod-2",
+                  "annotations": {
+                    "webhook": "true"
+                  }
+                },
+                "spec": {
+                  "containers": [
+                    {
+                      "name": "app",
+                      "image": "busybox:latest"
+                    }
+                  ]
+                }
+              }
+            }
+          }' https://localhost:8443/webhook &
+
+          curl -s -k -H "Content-Type: application/json" -d '{
+            "kind": "AdmissionReview",
+            "apiVersion": "admission.k8s.io/v1",
+            "request": {
+              "uid": "test3",
+              "kind": {"group": "", "version": "v1", "kind": "Pod"},
+              "resource": {"group": "", "version": "v1", "resource": "pods"},
+              "operation": "CREATE",
+              "object": {
+                "apiVersion": "v1",
+                "kind": "Pod",
+                "metadata": {
+                  "name": "test-pod-3",
+                  "annotations": {
+                    "webhook": "true"
+                  }
+                },
+                "spec": {
+                  "containers": [
+                    {
+                      "name": "app",
+                      "image": "memcached:alpine"
+                    }
+                  ]
+                }
+              }
+            }
+          }' https://localhost:8443/webhook &
+
+          # Wait for all images to be processed
+          IMAGES=("nginx:alpine" "redis:alpine" "postgres:alpine" "busybox:latest" "memcached:alpine")
+          timeout=120
+          for img in "${IMAGES[@]}"; do
+            while ! grep -q "Successfully downloaded image: $img" kube-mqtt-mirror.log; do
+              if [ $timeout -le 0 ]; then
+                echo "Image processing failed for $img"
+                cat kube-mqtt-mirror.log
+                exit 1
+              fi
+              sleep 1
+              ((timeout--))
+            done
+            echo "Successfully processed $img"
+          done
+
+      - name: Stop MQTT
+        if: matrix.messaging == 'mqtt'
+        run: |
+          sudo systemctl stop mosquitto
+          sudo rm -f /etc/mosquitto/conf.d/test.conf
