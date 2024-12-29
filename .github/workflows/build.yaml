@@ -127,111 +127,45 @@ jobs:
             ((timeout--))
           done
 
-      - name: Test Webhooks
+      - name: Test Concurrent Pods
         run: |
-          # Test multi-container pod
-          echo "Testing multi-container pod..."
-          curl -s -k -H "Content-Type: application/json" -d '{
-            "kind": "AdmissionReview",
-            "apiVersion": "admission.k8s.io/v1",
-            "request": {
-              "uid": "test1",
-              "kind": {"group": "", "version": "v1", "kind": "Pod"},
-              "resource": {"group": "", "version": "v1", "resource": "pods"},
-              "operation": "CREATE",
-              "object": {
-                "apiVersion": "v1",
-                "kind": "Pod",
-                "metadata": {
-                  "name": "test-pod-1",
-                  "annotations": {
-                    "webhook": "true"
-                  }
-                },
-                "spec": {
-                  "containers": [
-                    {
-                      "name": "web",
-                      "image": "nginx:alpine"
-                    },
-                    {
-                      "name": "cache",
-                      "image": "redis:alpine"
-                    },
-                    {
-                      "name": "db",
-                      "image": "postgres:alpine"
+          # Send multiple webhook requests concurrently
+          echo "Testing concurrent pod creation..."
+          for img in nginx:alpine redis:alpine postgres:alpine busybox:latest memcached:alpine; do
+            curl -s -k -H "Content-Type: application/json" -d '{
+              "kind": "AdmissionReview",
+              "apiVersion": "admission.k8s.io/v1",
+              "request": {
+                "uid": "'$(uuidgen)'",
+                "kind": {"group": "", "version": "v1", "kind": "Pod"},
+                "resource": {"group": "", "version": "v1", "resource": "pods"},
+                "operation": "CREATE",
+                "object": {
+                  "apiVersion": "v1",
+                  "kind": "Pod",
+                  "metadata": {
+                    "name": "test-pod-'${img/:/-}'",
+                    "annotations": {
+                      "webhook": "true"
                     }
-                  ]
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "app",
+                        "image": "'$img'"
+                      }
+                    ]
+                  }
                 }
               }
-            }
-          }' https://localhost:8443/webhook &
-
-          # Test concurrent pods
-          echo "Testing concurrent pods..."
-          curl -s -k -H "Content-Type: application/json" -d '{
-            "kind": "AdmissionReview",
-            "apiVersion": "admission.k8s.io/v1",
-            "request": {
-              "uid": "test2",
-              "kind": {"group": "", "version": "v1", "kind": "Pod"},
-              "resource": {"group": "", "version": "v1", "resource": "pods"},
-              "operation": "CREATE",
-              "object": {
-                "apiVersion": "v1",
-                "kind": "Pod",
-                "metadata": {
-                  "name": "test-pod-2",
-                  "annotations": {
-                    "webhook": "true"
-                  }
-                },
-                "spec": {
-                  "containers": [
-                    {
-                      "name": "app",
-                      "image": "busybox:latest"
-                    }
-                  ]
-                }
-              }
-            }
-          }' https://localhost:8443/webhook &
-
-          curl -s -k -H "Content-Type: application/json" -d '{
-            "kind": "AdmissionReview",
-            "apiVersion": "admission.k8s.io/v1",
-            "request": {
-              "uid": "test3",
-              "kind": {"group": "", "version": "v1", "kind": "Pod"},
-              "resource": {"group": "", "version": "v1", "resource": "pods"},
-              "operation": "CREATE",
-              "object": {
-                "apiVersion": "v1",
-                "kind": "Pod",
-                "metadata": {
-                  "name": "test-pod-3",
-                  "annotations": {
-                    "webhook": "true"
-                  }
-                },
-                "spec": {
-                  "containers": [
-                    {
-                      "name": "app",
-                      "image": "memcached:alpine"
-                    }
-                  ]
-                }
-              }
-            }
-          }' https://localhost:8443/webhook &
+            }' https://localhost:8443/webhook &
+          done
 
           # Wait for all images to be processed
-          IMAGES=("nginx:alpine" "redis:alpine" "postgres:alpine" "busybox:latest" "memcached:alpine")
+          echo "Waiting for image processing..."
           timeout=120
-          for img in "${IMAGES[@]}"; do
+          for img in nginx:alpine redis:alpine postgres:alpine busybox:latest memcached:alpine; do
             while ! grep -q "Successfully downloaded image: $img" kube-mqtt-mirror.log; do
               if [ $timeout -le 0 ]; then
                 echo "Image processing failed for $img"
@@ -244,8 +178,22 @@ jobs:
             echo "Successfully processed $img"
           done
 
-      - name: Stop MQTT
-        if: matrix.messaging == 'mqtt'
+      - name: Cleanup
+        if: always()
         run: |
-          sudo systemctl stop mosquitto
-          sudo rm -f /etc/mosquitto/conf.d/test.conf
+          # Stop program
+          pkill kube-mqtt-mirror || true
+
+          # Cleanup backend
+          case "${{ matrix.messaging }}" in
+            "sqlite")
+              rm -f test.db
+              ;;
+            "mqtt")
+              sudo systemctl stop mosquitto
+              sudo rm -f /etc/mosquitto/conf.d/test.conf
+              ;;
+          esac
+
+          # Cleanup files
+          rm -f server.key server.crt kube-mqtt-mirror.log

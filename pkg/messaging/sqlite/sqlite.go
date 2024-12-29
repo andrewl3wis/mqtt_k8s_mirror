@@ -104,27 +104,46 @@ func (s *sqliteClient) Publish(image string) error {
 		return fmt.Errorf("failed to marshal image request: %v", err)
 	}
 
-	// Use a transaction for atomic insert
-	tx, err := s.db.Begin()
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %v", err)
-	}
-	defer tx.Rollback()
+	// Retry logic for database locks
+	maxRetries := 5
+	backoff := 100 * time.Millisecond
 
-	_, err = tx.Exec(
-		"INSERT INTO messages (topic, payload) VALUES (?, ?)",
-		s.config.Topic,
-		string(payload),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to insert message: %v", err)
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		// Use a transaction for atomic insert
+		tx, err := s.db.Begin()
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction: %v", err)
+		}
+		defer tx.Rollback()
+
+		_, err = tx.Exec(
+			"INSERT INTO messages (topic, payload) VALUES (?, ?)",
+			s.config.Topic,
+			string(payload),
+		)
+		if err != nil {
+			if err.Error() == "database is locked" {
+				tx.Rollback()
+				time.Sleep(backoff)
+				backoff *= 2 // Exponential backoff
+				continue
+			}
+			return fmt.Errorf("failed to insert message: %v", err)
+		}
+
+		if err := tx.Commit(); err != nil {
+			if err.Error() == "database is locked" {
+				time.Sleep(backoff)
+				backoff *= 2 // Exponential backoff
+				continue
+			}
+			return fmt.Errorf("failed to commit transaction: %v", err)
+		}
+
+		return nil
 	}
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit transaction: %v", err)
-	}
-
-	return nil
+	return fmt.Errorf("failed to publish after %d retries: database is locked", maxRetries)
 }
 
 func (s *sqliteClient) Subscribe(handler func(messaging.ImageRequest) error) error {
