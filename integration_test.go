@@ -18,6 +18,10 @@ import (
 	"testing"
 	"time"
 
+	"kube-mqtt-mirror/pkg/image"
+	"kube-mqtt-mirror/pkg/mirror"
+	"kube-mqtt-mirror/pkg/webhook"
+
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -57,62 +61,71 @@ func TestImageMirroringWithAllBackends(t *testing.T) {
 			}
 			defer os.RemoveAll(testDir)
 
-			// Generate test certificates (even if not used)
-			certPath := filepath.Join(testDir, "server.crt")
-			keyPath := filepath.Join(testDir, "server.key")
-			if err := generateTestCerts(certPath, keyPath); err != nil {
-				t.Fatalf("Failed to generate test certificates: %v", err)
-			}
-
 			// Create test logger
 			logger := log.New(os.Stdout, fmt.Sprintf("[%s] ", tc.name), log.LstdFlags)
+
+			// Generate test certificates (even if not used)
+			var certPath, keyPath string
+			if tc.tlsCert != "" && tc.tlsKey != "" {
+				certPath = filepath.Join(testDir, tc.tlsCert)
+				keyPath = filepath.Join(testDir, tc.tlsKey)
+				if err := generateTestCerts(certPath, keyPath); err != nil {
+					t.Fatalf("Failed to generate test certificates: %v", err)
+				}
+			}
 
 			// Create app context with short timeout
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
-			// Start services
-			app := &AppContext{
-				config: Config{
-					EnableWebhook:      true,
-					EnableMirror:       true,
-					MessagingType:      tc.messagingType,
-					MessagingBroker:    tc.broker,
-					MessagingTopic:     "test/images",
-					LocalRegistry:      "mock://localhost:5000",
-					WebhookPort:        "0", // Use random port
-					InsecureRegistries: true,
-					TLSCertPath:        tc.tlsCert,
-					TLSKeyPath:         tc.tlsKey,
-				},
-				downloadQueue: make(chan string, 100),
-				wg:            &sync.WaitGroup{},
-				logger:        logger,
+			// Create configuration
+			config := Config{
+				EnableWebhook:      true,
+				EnableMirror:       true,
+				MessagingType:      tc.messagingType,
+				MessagingBroker:    tc.broker,
+				MessagingTopic:     "test/images",
+				LocalRegistry:      "mock://localhost:5000",
+				WebhookPort:        "0", // Use random port
+				InsecureRegistries: true,
+				TLSCertPath:        certPath,
+				TLSKeyPath:         keyPath,
 			}
 
-			// Mock image operations
-			app.imageExistsInLocalRegistry = func(image string) bool {
-				return true // Always return true to speed up tests
-			}
-			app.copyImage = func(srcImage, destImage string) error {
-				return nil // No-op for tests
+			// Create messaging client
+			msgClient, err := createMessagingClient(config, logger)
+			if err != nil {
+				t.Fatalf("Failed to create messaging client: %v", err)
 			}
 
-			// Start services with context
-			errChan := make(chan error, 1)
+			// Connect to messaging system
+			if err := msgClient.Connect(ctx); err != nil {
+				t.Fatalf("Failed to connect to messaging system: %v", err)
+			}
+			defer msgClient.Disconnect()
+
+			// Create image operations with mocks
+			imgOps := image.NewOperations(logger, config.LocalRegistry, config.InsecureRegistries)
+
+			// Create mirror service
+			mirrorService := mirror.NewService(logger, msgClient, imgOps, config.LocalRegistry)
+			if err := mirrorService.Start(ctx); err != nil {
+				t.Fatalf("Failed to start mirror service: %v", err)
+			}
+			defer mirrorService.Shutdown()
+
+			// Create webhook server
+			webhookServer := webhook.NewServer(logger, msgClient, config.WebhookPort, config.TLSCertPath, config.TLSKeyPath)
+
+			// Start webhook server
+			var wg sync.WaitGroup
+			wg.Add(1)
 			go func() {
-				errChan <- app.startServices(ctx)
-			}()
-
-			// Wait for server to start or error
-			select {
-			case err := <-errChan:
-				if err != nil {
-					t.Fatalf("Failed to start services: %v", err)
+				defer wg.Done()
+				if err := webhookServer.Start(ctx); err != nil {
+					logger.Printf("Webhook server error: %v", err)
 				}
-			case <-time.After(time.Second):
-				// Server started successfully
-			}
+			}()
 
 			// Test webhook with single pod
 			pod := &corev1.Pod{
@@ -126,7 +139,7 @@ func TestImageMirroringWithAllBackends(t *testing.T) {
 				},
 			}
 
-			// Create admission review
+			// Create admission review and test webhook
 			review := &admissionv1.AdmissionReview{
 				Request: &admissionv1.AdmissionRequest{
 					UID: "test",
@@ -136,36 +149,27 @@ func TestImageMirroringWithAllBackends(t *testing.T) {
 				},
 			}
 
-			// Send webhook request
-			resp := app.processAdmissionReview(review)
-			if !resp.Response.Allowed {
-				t.Errorf("Pod not allowed: %s", resp.Response.Result.Message)
+			// Give webhook server time to start
+			time.Sleep(100 * time.Millisecond)
+
+			// Process review
+			response := webhookServer.ProcessAdmissionReview(review)
+			if !response.Response.Allowed {
+				t.Errorf("Pod not allowed: %s", response.Response.Result.Message)
 			}
 
 			// Clean shutdown
 			cancel()
 
 			// Stop webhook server
-			if app.server != nil {
-				shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Second)
-				defer shutdownCancel()
-				if err := app.server.Shutdown(shutdownCtx); err != nil {
-					logger.Printf("Failed to shutdown webhook server: %v", err)
-				}
+			if err := webhookServer.Shutdown(ctx); err != nil {
+				logger.Printf("Failed to shutdown webhook server: %v", err)
 			}
-
-			// Stop messaging client
-			if app.msgClient != nil {
-				app.msgClient.Disconnect()
-			}
-
-			// Close download queue
-			close(app.downloadQueue)
 
 			// Wait for all goroutines with timeout
 			done := make(chan struct{})
 			go func() {
-				app.wg.Wait()
+				wg.Wait()
 				close(done)
 			}()
 
