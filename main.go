@@ -330,6 +330,13 @@ func (app *AppContext) startMessaging() error {
 func (app *AppContext) processDownloadQueue(ctx context.Context) {
 	defer app.wg.Done()
 
+	// Track in-progress downloads to prevent duplicates
+	inProgress := make(map[string]bool)
+	var mu sync.Mutex
+
+	// Rate limiter for concurrent downloads
+	maxConcurrent := make(chan struct{}, 3) // Allow 3 concurrent downloads
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -338,13 +345,45 @@ func (app *AppContext) processDownloadQueue(ctx context.Context) {
 			if !ok {
 				return
 			}
+
+			// Check if already downloading
+			mu.Lock()
+			if inProgress[image] {
+				app.logger.Printf("Image already being downloaded: %s", image)
+				mu.Unlock()
+				continue
+			}
+			inProgress[image] = true
+			mu.Unlock()
+
 			app.wg.Add(1)
 			go func(img string) {
 				defer app.wg.Done()
-				if err := app.doCopyImage(img, fmt.Sprintf("%s/%s", app.config.LocalRegistry, img)); err != nil {
-					app.logger.Printf("Failed to download image: %v", err)
-				} else {
+				defer func() {
+					mu.Lock()
+					delete(inProgress, img)
+					mu.Unlock()
+				}()
+
+				// Rate limit concurrent downloads
+				maxConcurrent <- struct{}{}
+				defer func() { <-maxConcurrent }()
+
+				// Try up to 3 times with exponential backoff
+				backoff := time.Second
+				for attempt := 1; attempt <= 3; attempt++ {
+					if err := app.doCopyImage(img, fmt.Sprintf("%s/%s", app.config.LocalRegistry, img)); err != nil {
+						if attempt == 3 {
+							app.logger.Printf("Failed to download image after %d attempts: %v", attempt, err)
+							return
+						}
+						app.logger.Printf("Download attempt %d failed: %v, retrying in %v", attempt, err, backoff)
+						time.Sleep(backoff)
+						backoff *= 2
+						continue
+					}
 					app.logger.Printf("Successfully downloaded image: %s", img)
+					return
 				}
 			}(image)
 		}

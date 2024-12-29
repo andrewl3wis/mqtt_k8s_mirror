@@ -151,10 +151,15 @@ func (s *sqliteClient) Subscribe(handler func(messaging.ImageRequest) error) err
 
 	// Start polling for new messages
 	go func() {
-		ticker := time.NewTicker(1 * time.Second)
+		// Start with shorter interval, increase when idle
+		interval := 100 * time.Millisecond
+		maxInterval := time.Second
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
 		var lastID int64
+		idleCount := 0
+
 		for {
 			select {
 			case <-s.stopChan:
@@ -171,6 +176,7 @@ func (s *sqliteClient) Subscribe(handler func(messaging.ImageRequest) error) err
 					continue
 				}
 
+				messageCount := 0
 				for rows.Next() {
 					var id int64
 					var payload string
@@ -190,8 +196,26 @@ func (s *sqliteClient) Subscribe(handler func(messaging.ImageRequest) error) err
 					}
 
 					lastID = id
+					messageCount++
 				}
 				rows.Close()
+
+				// Adjust polling interval based on activity
+				if messageCount > 0 {
+					// Messages found, decrease interval for responsiveness
+					interval = 100 * time.Millisecond
+					idleCount = 0
+				} else {
+					// No messages, gradually increase interval
+					idleCount++
+					if idleCount > 5 && interval < maxInterval {
+						interval *= 2
+						if interval > maxInterval {
+							interval = maxInterval
+						}
+					}
+				}
+				ticker.Reset(interval)
 			}
 		}
 	}()
