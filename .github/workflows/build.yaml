@@ -7,11 +7,8 @@ on:
     branches: [ main ]
 
 jobs:
-  test:
+  build:
     runs-on: ubuntu-22.04
-    strategy:
-      matrix:
-        messaging: [sqlite, mqtt, postgres]
     steps:
       - uses: actions/checkout@v3
 
@@ -24,6 +21,30 @@ jobs:
         run: |
           CGO_ENABLED=0 go build -o kube-mqtt-mirror .
           chmod +x kube-mqtt-mirror
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v3
+        with:
+          name: kube-mqtt-mirror
+          path: kube-mqtt-mirror
+          retention-days: 1
+
+  test:
+    needs: build
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        messaging: [sqlite, mqtt, postgres]
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Download binary
+        uses: actions/download-artifact@v3
+        with:
+          name: kube-mqtt-mirror
+          
+      - name: Make binary executable
+        run: chmod +x kube-mqtt-mirror
 
       - name: Install kubectl
         uses: azure/setup-kubectl@v3
