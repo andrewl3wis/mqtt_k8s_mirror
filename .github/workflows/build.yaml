@@ -162,10 +162,7 @@ jobs:
                   "apiVersion": "v1",
                   "kind": "Pod",
                   "metadata": {
-                    "name": "test-pod-'${img/:/-}'",
-                    "annotations": {
-                      "webhook": "true"
-                    }
+                    "name": "test-pod-'${img/:/-}'"
                   },
                   "spec": {
                     "containers": [

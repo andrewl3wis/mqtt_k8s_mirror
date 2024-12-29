@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -29,6 +31,12 @@ import (
 	"kube-mqtt-mirror/pkg/messaging/queue"
 )
 
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 // Config holds all configuration parameters
 type Config struct {
 	EnableWebhook      bool
@@ -44,7 +52,7 @@ type Config struct {
 	TLSCertPath        string
 	TLSKeyPath         string
 	LogFile            string
-	MultiInstance      bool
+	EnableTLS          bool
 }
 
 // AppContext holds application-wide context and resources
@@ -194,11 +202,14 @@ func parseFlags() Config {
 	config := Config{}
 
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s [options]\n\nOptions:\n", os.Args[0])
+		fmt.Fprintf(flag.CommandLine.Output(), "kube-mqtt-mirror %s (%s) built on %s\n\nUsage: %s [options]\n\nOptions:\n",
+			version, commit, date, os.Args[0])
 		flag.PrintDefaults()
 		fmt.Fprintf(flag.CommandLine.Output(), "\nExamples:\n")
-		fmt.Fprintf(flag.CommandLine.Output(), "  Local queue:\n")
+		fmt.Fprintf(flag.CommandLine.Output(), "  Without TLS (behind reverse proxy):\n")
 		fmt.Fprintf(flag.CommandLine.Output(), "    %s -webhook -mirror -messaging-type queue\n", os.Args[0])
+		fmt.Fprintf(flag.CommandLine.Output(), "  With TLS (direct access):\n")
+		fmt.Fprintf(flag.CommandLine.Output(), "    %s -webhook -mirror -messaging-type queue -tls-cert server.crt -tls-key server.key\n", os.Args[0])
 		fmt.Fprintf(flag.CommandLine.Output(), "  MQTT broker:\n")
 		fmt.Fprintf(flag.CommandLine.Output(), "    %s -webhook -mirror -messaging-type mqtt -broker tcp://localhost:1883\n", os.Args[0])
 		fmt.Fprintf(flag.CommandLine.Output(), "  PostgreSQL:\n")
@@ -223,8 +234,8 @@ func parseFlags() Config {
 	flag.StringVar(&config.LocalRegistry, "local-registry", "localhost:5000", "Address of local Docker registry to mirror images to")
 	flag.StringVar(&config.WebhookPort, "webhook-port", "8443", "Port for webhook server to listen on")
 	flag.BoolVar(&config.InsecureRegistries, "insecure-registries", false, "Allow pulling from insecure (HTTP) registries")
-	flag.StringVar(&config.TLSCertPath, "tls-cert", "server.crt", "Path to TLS certificate for webhook server")
-	flag.StringVar(&config.TLSKeyPath, "tls-key", "server.key", "Path to TLS private key for webhook server")
+	flag.StringVar(&config.TLSCertPath, "tls-cert", "", "Path to TLS certificate for webhook server (enables TLS if provided)")
+	flag.StringVar(&config.TLSKeyPath, "tls-key", "", "Path to TLS private key for webhook server (enables TLS if provided)")
 	flag.StringVar(&config.LogFile, "log-file", "", "Log file path (defaults to stdout)")
 
 	flag.Parse()
@@ -232,6 +243,9 @@ func parseFlags() Config {
 	if !config.EnableWebhook && !config.EnableMirror {
 		log.Fatal("At least one of --webhook or --mirror must be enabled")
 	}
+
+	// Enable TLS if cert and key paths are provided
+	config.EnableTLS = config.TLSCertPath != "" && config.TLSKeyPath != ""
 
 	return config
 }
@@ -410,8 +424,21 @@ func (app *AppContext) startWebhookServer(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/webhook", app.handleWebhook)
 
+	// Create listener first to get the actual port
+	var listener net.Listener
+	var err error
+
+	if app.config.WebhookPort == "0" {
+		// Random port
+		listener, err = net.Listen("tcp", "0.0.0.0:0")
+	} else {
+		listener, err = net.Listen("tcp", "0.0.0.0:"+app.config.WebhookPort)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to create listener: %v", err)
+	}
+
 	app.server = &http.Server{
-		Addr:    "0.0.0.0:" + app.config.WebhookPort,
 		Handler: mux,
 	}
 
@@ -422,8 +449,28 @@ func (app *AppContext) startWebhookServer(ctx context.Context) error {
 		app.wg.Done()
 	}()
 
-	app.logger.Printf("Starting webhook server with TLS on 0.0.0.0:%s", app.config.WebhookPort)
-	return app.server.ListenAndServeTLS(app.config.TLSCertPath, app.config.TLSKeyPath)
+	// Get the actual port
+	_, port, _ := net.SplitHostPort(listener.Addr().String())
+
+	if !app.config.EnableTLS {
+		app.logger.Printf("Starting webhook server without TLS on 0.0.0.0:%s", port)
+		return app.server.Serve(listener)
+	}
+
+	// Load TLS certificate
+	cert, err := tls.LoadX509KeyPair(app.config.TLSCertPath, app.config.TLSKeyPath)
+	if err != nil {
+		return fmt.Errorf("failed to load TLS certificate: %v", err)
+	}
+
+	app.logger.Printf("Starting webhook server with TLS on 0.0.0.0:%s", port)
+
+	// Wrap listener with TLS
+	tlsListener := tls.NewListener(listener, &tls.Config{
+		Certificates: []tls.Certificate{cert},
+	})
+
+	return app.server.Serve(tlsListener)
 }
 
 func (app *AppContext) handleWebhook(w http.ResponseWriter, r *http.Request) {
@@ -477,16 +524,15 @@ func (app *AppContext) processAdmissionReview(admissionReview *admissionv1.Admis
 		return response
 	}
 
-	if pod.Annotations["webhook"] == "true" {
-		for _, container := range pod.Spec.Containers {
-			image := container.Image
-			app.logger.Printf("Detected webhook pod with image: %s", image)
+	// Process all containers in the pod
+	for _, container := range pod.Spec.Containers {
+		image := container.Image
+		app.logger.Printf("Detected webhook pod with image: %s", image)
 
-			if err := app.msgClient.Publish(image); err != nil {
-				app.logger.Printf("Failed to publish image: %v", err)
-			} else {
-				app.logger.Printf("Published image: %s", image)
-			}
+		if err := app.msgClient.Publish(image); err != nil {
+			app.logger.Printf("Failed to publish image: %v", err)
+		} else {
+			app.logger.Printf("Published image: %s", image)
 		}
 	}
 

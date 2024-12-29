@@ -131,18 +131,37 @@ webhooks:
   timeoutSeconds: 5
 ```
 
-3. Add annotation to pods you want to mirror:
+3. Example Pod Configurations:
+
+Single container:
 ```yaml
 apiVersion: v1
 kind: Pod
 metadata:
-  annotations:
-    webhook: "true"
+  name: web
 spec:
   containers:
-  - name: app
+  - name: nginx
     image: nginx:latest
 ```
+
+Multiple containers:
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-stack
+spec:
+  containers:
+  - name: web
+    image: nginx:latest
+  - name: cache
+    image: redis:alpine
+  - name: db
+    image: postgres:14
+```
+
+The webhook will automatically mirror all container images from any pod created in the cluster.
 
 ## Development
 

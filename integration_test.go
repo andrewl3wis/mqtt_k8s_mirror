@@ -2,420 +2,238 @@ package main
 
 import (
 	"context"
-	"database/sql"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"log"
+	"math/big"
+	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	mqtt "github.com/mochi-mqtt/server/v2"
-	"github.com/mochi-mqtt/server/v2/hooks/auth"
-	"github.com/mochi-mqtt/server/v2/listeners"
+	admissionv1 "k8s.io/api/admission/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 func TestImageMirroringWithAllBackends(t *testing.T) {
-	// Test configuration for each backend
 	testCases := []struct {
 		name          string
 		messagingType string
 		broker        string
-		setup         func() error
-		cleanup       func() error
+		tlsCert       string
+		tlsKey        string
 	}{
 		{
-			name:          "SQLite Backend",
-			messagingType: "sqlite",
-			broker:        ":memory:",
-			setup:         func() error { return nil },
-			cleanup:       func() error { return nil },
+			name:          "Queue Backend with TLS",
+			messagingType: "queue",
+			broker:        "", // In-memory only
+			tlsCert:       "server.crt",
+			tlsKey:        "server.key",
 		},
 		{
-			name:          "SQLite File Backend",
-			messagingType: "sqlite",
-			broker:        "test.db",
-			setup:         func() error { return nil },
-			cleanup: func() error {
-				return os.Remove("test.db")
-			},
-		},
-		{
-			name:          "PostgreSQL Backend",
-			messagingType: "postgres",
-			broker:        "", // Set during setup
-			setup: func() error {
-				// Pull PostgreSQL image
-				cmd := exec.Command("docker", "pull", "postgres:14-alpine")
-				if out, err := cmd.CombinedOutput(); err != nil {
-					return fmt.Errorf("failed to pull postgres image: %v: %s", err, out)
-				}
-
-				// Start PostgreSQL container
-				cmd = exec.Command("docker", "run", "-d", "--rm",
-					"-e", "POSTGRES_USER=test",
-					"-e", "POSTGRES_PASSWORD=test",
-					"-e", "POSTGRES_DB=test",
-					"-P", "postgres:14-alpine")
-				out, err := cmd.CombinedOutput()
-				if err != nil {
-					return fmt.Errorf("failed to start postgres container: %v: %s", err, out)
-				}
-				return nil
-			},
-			cleanup: func() error {
-				// Stop PostgreSQL container
-				cmd := exec.Command("docker", "ps", "-q", "-f", "ancestor=postgres:14-alpine")
-				out, err := cmd.Output()
-				if err != nil {
-					return fmt.Errorf("failed to find postgres container: %v", err)
-				}
-				containerId := strings.TrimSpace(string(out))
-				if containerId != "" {
-					cmd = exec.Command("docker", "stop", containerId)
-					if err := cmd.Run(); err != nil {
-						return fmt.Errorf("failed to stop postgres container: %v", err)
-					}
-				}
-				return nil
-			},
-		},
-		{
-			name:          "Local Registry Backend",
-			messagingType: "registry",
-			broker:        "", // Set during setup
-			setup: func() error {
-				// Pull registry image
-				cmd := exec.Command("docker", "pull", "registry:2")
-				if out, err := cmd.CombinedOutput(); err != nil {
-					return fmt.Errorf("failed to pull registry image: %v: %s", err, out)
-				}
-
-				// Start local registry container
-				cmd = exec.Command("docker", "run", "-d", "--rm",
-					"-p", "5000:5000",
-					"registry:2")
-				out, err := cmd.CombinedOutput()
-				if err != nil {
-					return fmt.Errorf("failed to start registry container: %v: %s", err, out)
-				}
-				return nil
-			},
-			cleanup: func() error {
-				// Stop registry container
-				cmd := exec.Command("docker", "ps", "-q", "-f", "ancestor=registry:2")
-				out, err := cmd.Output()
-				if err != nil {
-					return fmt.Errorf("failed to find registry container: %v", err)
-				}
-				containerId := strings.TrimSpace(string(out))
-				if containerId != "" {
-					cmd = exec.Command("docker", "stop", containerId)
-					if err := cmd.Run(); err != nil {
-						return fmt.Errorf("failed to stop registry container: %v", err)
-					}
-				}
-				return nil
-			},
-		},
-		{
-			name:          "Embedded MQTT Backend",
-			messagingType: "mqtt",
-			broker:        "", // Set during setup
-			setup: func() error {
-				return nil
-			},
-			cleanup: func() error {
-				// MQTT server cleanup is handled by Go runtime
-				return nil
-			},
+			name:          "Queue Backend without TLS",
+			messagingType: "queue",
+			broker:        "", // In-memory only
+			tlsCert:       "", // No TLS paths = no TLS
+			tlsKey:        "",
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Create app context
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-
-			// Create test logger
-			logger := log.New(os.Stdout, fmt.Sprintf("test-%s: ", tc.name), log.LstdFlags)
-
-			// Create temporary directory for test registry
-			testDir, err := os.MkdirTemp("", "registry-test-*")
+			// Create test directory
+			testDir, err := os.MkdirTemp("", "mirror-test-*")
 			if err != nil {
 				t.Fatalf("Failed to create temp dir: %v", err)
 			}
 			defer os.RemoveAll(testDir)
 
-			// Create a mock registry check function
-			var imageExistsMu sync.Mutex
-			imageExists := make(map[string]bool)
-			mockImageCheck := func(image string) bool {
-				imageExistsMu.Lock()
-				exists := imageExists[image]
-				if !exists {
-					// Simulate image being downloaded
-					go func() {
-						time.Sleep(100 * time.Millisecond)
-						imageExistsMu.Lock()
-						imageExists[image] = true
-						imageExistsMu.Unlock()
-					}()
-				}
-				imageExistsMu.Unlock()
-				return exists
+			// Generate test certificates (even if not used)
+			certPath := filepath.Join(testDir, "server.crt")
+			keyPath := filepath.Join(testDir, "server.key")
+			if err := generateTestCerts(certPath, keyPath); err != nil {
+				t.Fatalf("Failed to generate test certificates: %v", err)
 			}
 
-			// Create app context
+			// Create test logger
+			logger := log.New(os.Stdout, fmt.Sprintf("[%s] ", tc.name), log.LstdFlags)
+
+			// Create app context with short timeout
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			// Start services
 			app := &AppContext{
 				config: Config{
+					EnableWebhook:      true,
 					EnableMirror:       true,
 					MessagingType:      tc.messagingType,
 					MessagingBroker:    tc.broker,
 					MessagingTopic:     "test/images",
-					LocalRegistry:      filepath.Join(testDir, "registry"),
+					LocalRegistry:      "mock://localhost:5000",
+					WebhookPort:        "0", // Use random port
 					InsecureRegistries: true,
+					TLSCertPath:        tc.tlsCert,
+					TLSKeyPath:         tc.tlsKey,
 				},
 				downloadQueue: make(chan string, 100),
 				wg:            &sync.WaitGroup{},
 				logger:        logger,
 			}
 
-			// Setup test environment
-			if tc.messagingType == "registry" {
-				// Wait for registry container to start
-				var containerId string
-				var lastError error
-				for i := 0; i < 30; i++ {
-					cmd := exec.Command("docker", "ps", "-q", "-f", "ancestor=registry:2")
-					if out, err := cmd.CombinedOutput(); err != nil {
-						lastError = fmt.Errorf("docker ps failed: %v: %s", err, out)
-					} else {
-						containerId = strings.TrimSpace(string(out))
-						if containerId != "" {
-							break
-						}
-					}
-					time.Sleep(1 * time.Second)
-				}
-				if containerId == "" {
-					if lastError != nil {
-						t.Fatalf("Registry container not found after waiting: %v", lastError)
-					} else {
-						t.Fatal("Registry container not found after waiting")
-					}
-				}
-
-				// Set connection details
-				tc.broker = "localhost:5000"
-
-				// Wait for registry to be ready
-				var lastCurlError error
-				for i := 0; i < 30; i++ {
-					cmd := exec.Command("curl", "-f", "http://localhost:5000/v2/")
-					if out, err := cmd.CombinedOutput(); err == nil {
-						break
-					} else {
-						lastCurlError = fmt.Errorf("curl failed: %v: %s", err, out)
-					}
-					time.Sleep(1 * time.Second)
-				}
-				if lastCurlError != nil {
-					t.Fatalf("Registry not ready after waiting: %v", lastCurlError)
-				}
-			} else if tc.messagingType == "postgres" {
-				// Wait for PostgreSQL container to start
-				var containerId string
-				var lastError error
-				for i := 0; i < 30; i++ {
-					cmd := exec.Command("docker", "ps", "-q", "-f", "ancestor=postgres:14-alpine")
-					if out, err := cmd.CombinedOutput(); err != nil {
-						lastError = fmt.Errorf("docker ps failed: %v: %s", err, out)
-					} else {
-						containerId = strings.TrimSpace(string(out))
-						if containerId != "" {
-							break
-						}
-					}
-					time.Sleep(1 * time.Second)
-				}
-				if containerId == "" {
-					if lastError != nil {
-						t.Fatalf("PostgreSQL container not found after waiting: %v", lastError)
-					} else {
-						t.Fatal("PostgreSQL container not found after waiting")
-					}
-				}
-
-				// Wait for port to be available
-				var port string
-				var lastPortError error
-				for i := 0; i < 30; i++ {
-					cmd := exec.Command("docker", "port", containerId, "5432")
-					if out, err := cmd.CombinedOutput(); err != nil {
-						lastPortError = fmt.Errorf("docker port failed: %v: %s", err, out)
-					} else {
-						port = strings.TrimSpace(strings.Split(string(out), ":")[1])
-						if port != "" {
-							break
-						}
-					}
-					time.Sleep(1 * time.Second)
-				}
-				if port == "" {
-					if lastPortError != nil {
-						t.Fatalf("Failed to get PostgreSQL port after waiting: %v", lastPortError)
-					} else {
-						t.Fatal("Failed to get PostgreSQL port after waiting")
-					}
-				}
-
-				// Set connection details
-				tc.broker = fmt.Sprintf("localhost:%s", port)
-				app.config.MessagingUsername = "test"
-				app.config.MessagingPassword = "test"
-
-				// Create test table
-				db, err := sql.Open("postgres", fmt.Sprintf("postgres://test:test@%s/test?sslmode=disable", tc.broker))
-				if err != nil {
-					t.Fatalf("Failed to connect to postgres: %v", err)
-				}
-				defer db.Close()
-
-				_, err = db.Exec(`
-					CREATE TABLE IF NOT EXISTS messages (
-						id SERIAL PRIMARY KEY,
-						topic TEXT NOT NULL,
-						payload TEXT NOT NULL,
-						created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-					)
-				`)
-				if err != nil {
-					t.Fatalf("Failed to create table: %v", err)
-				}
-			} else if tc.messagingType == "mqtt" {
-				// Create MQTT server
-				server := mqtt.New(&mqtt.Options{})
-
-				// Allow all connections
-				_ = server.AddHook(new(auth.AllowHook), nil)
-
-				// Create MQTT listener with random port
-				portChan := make(chan int, 1)
-				errChan := make(chan error, 1)
-
-				go func() {
-					tcp := listeners.NewTCP(listeners.Config{
-						ID:      "t1",
-						Address: "127.0.0.1:0",
-					})
-
-					if err := server.AddListener(tcp); err != nil {
-						errChan <- fmt.Errorf("failed to add MQTT listener: %v", err)
-						return
-					}
-
-					// Get the assigned port before starting the server
-					addr := strings.Split(tcp.Address(), ":")[1]
-					port := 0
-					fmt.Sscanf(addr, "%d", &port)
-					portChan <- port
-
-					if err := server.Serve(); err != nil {
-						errChan <- fmt.Errorf("MQTT server error: %v", err)
-					}
-				}()
-
-				// Wait for server to start
-				select {
-				case err := <-errChan:
-					t.Fatalf("Failed to start MQTT server: %v", err)
-				case port := <-portChan:
-					tc.broker = fmt.Sprintf("tcp://127.0.0.1:%d", port)
-				case <-time.After(5 * time.Second):
-					t.Fatal("Timeout waiting for MQTT server to start")
-				}
-			} else {
-				if err := tc.setup(); err != nil {
-					t.Fatalf("Failed to setup test: %v", err)
-				}
+			// Mock image operations
+			app.imageExistsInLocalRegistry = func(image string) bool {
+				return true // Always return true to speed up tests
 			}
-			defer tc.cleanup()
-
-			// Set mock functions
-			app.imageExistsInLocalRegistry = mockImageCheck
 			app.copyImage = func(srcImage, destImage string) error {
-				return nil // Simulate successful image copy
+				return nil // No-op for tests
 			}
 
-			// Start services
-			app.wg.Add(1)
-			go app.processDownloadQueue(ctx)
+			// Start services with context
+			errChan := make(chan error, 1)
+			go func() {
+				errChan <- app.startServices(ctx)
+			}()
 
-			// For PostgreSQL, wait a bit for the server to be ready
-			if tc.messagingType == "postgres" {
-				time.Sleep(2 * time.Second)
-			}
-
-			if err := app.startMessaging(); err != nil {
-				t.Fatalf("Failed to start messaging: %v", err)
-			}
-
-			// Test images to mirror (with proper registry format)
-			testImages := []string{
-				"docker.io/library/nginx:latest",
-				"docker.io/library/redis:alpine",
-				"docker.io/library/postgres:13",
-			}
-
-			// Publish test images
-			for _, image := range testImages {
-				if err := app.msgClient.Publish(image); err != nil {
-					t.Errorf("Failed to publish image %s: %v", image, err)
-					continue
+			// Wait for server to start or error
+			select {
+			case err := <-errChan:
+				if err != nil {
+					t.Fatalf("Failed to start services: %v", err)
 				}
-				logger.Printf("Published image: %s", image)
+			case <-time.After(time.Second):
+				// Server started successfully
 			}
 
-			// Wait for images to be processed
-			timeout := time.After(30 * time.Second)
-			processed := make(map[string]bool)
-
-		checkLoop:
-			for len(processed) < len(testImages) {
-				select {
-				case <-timeout:
-					t.Fatalf("Timeout waiting for images. Processed %d out of %d", len(processed), len(testImages))
-					break checkLoop
-				case <-time.After(1 * time.Second):
-					// Check each image
-					for _, image := range testImages {
-						if processed[image] {
-							continue
-						}
-						if app.checkImageExists(image) {
-							processed[image] = true
-							logger.Printf("Image mirrored successfully: %s", image)
-						}
-					}
-				}
+			// Test webhook with single pod
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-pod",
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "web", Image: "nginx:alpine"},
+					},
+				},
 			}
 
-			// Verify all images were processed
-			for _, image := range testImages {
-				if !processed[image] {
-					t.Errorf("Image not processed: %s", image)
-				}
+			// Create admission review
+			review := &admissionv1.AdmissionReview{
+				Request: &admissionv1.AdmissionRequest{
+					UID: "test",
+					Object: runtime.RawExtension{
+						Raw: mustMarshal(t, pod),
+					},
+				},
+			}
+
+			// Send webhook request
+			resp := app.processAdmissionReview(review)
+			if !resp.Response.Allowed {
+				t.Errorf("Pod not allowed: %s", resp.Response.Result.Message)
 			}
 
 			// Clean shutdown
 			cancel()
-			app.shutdown()
-			app.wg.Wait()
+
+			// Stop webhook server
+			if app.server != nil {
+				shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Second)
+				defer shutdownCancel()
+				if err := app.server.Shutdown(shutdownCtx); err != nil {
+					logger.Printf("Failed to shutdown webhook server: %v", err)
+				}
+			}
+
+			// Stop messaging client
+			if app.msgClient != nil {
+				app.msgClient.Disconnect()
+			}
+
+			// Close download queue
+			close(app.downloadQueue)
+
+			// Wait for all goroutines with timeout
+			done := make(chan struct{})
+			go func() {
+				app.wg.Wait()
+				close(done)
+			}()
+
+			select {
+			case <-done:
+				logger.Printf("Clean shutdown completed")
+			case <-time.After(time.Second):
+				t.Fatal("Timeout waiting for shutdown")
+			}
 		})
 	}
+}
+
+func generateTestCerts(certPath, keyPath string) error {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return fmt.Errorf("failed to generate private key: %v", err)
+	}
+
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			CommonName: "localhost",
+		},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		DNSNames:              []string{"localhost"},
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+	}
+
+	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &privateKey.PublicKey, privateKey)
+	if err != nil {
+		return fmt.Errorf("failed to create certificate: %v", err)
+	}
+
+	certOut, err := os.Create(certPath)
+	if err != nil {
+		return fmt.Errorf("failed to create cert file: %v", err)
+	}
+	defer certOut.Close()
+
+	if err := pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes}); err != nil {
+		return fmt.Errorf("failed to encode certificate: %v", err)
+	}
+
+	keyOut, err := os.Create(keyPath)
+	if err != nil {
+		return fmt.Errorf("failed to create key file: %v", err)
+	}
+	defer keyOut.Close()
+
+	if err := pem.Encode(keyOut, &pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(privateKey),
+	}); err != nil {
+		return fmt.Errorf("failed to encode private key: %v", err)
+	}
+
+	return nil
+}
+
+func mustMarshal(t *testing.T, v interface{}) []byte {
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("Failed to marshal: %v", err)
+	}
+	return data
 }

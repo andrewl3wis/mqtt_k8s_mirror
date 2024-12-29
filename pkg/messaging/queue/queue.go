@@ -5,44 +5,32 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
 	"kube-mqtt-mirror/pkg/messaging"
 )
 
-// QueueClient implements a simple, efficient queue for single-instance use
+// QueueClient implements a simple, in-memory queue
 type QueueClient struct {
-	path      string
-	topic     string
-	logger    *log.Logger
-	handler   func(messaging.ImageRequest) error
-	mu        sync.RWMutex
-	stopChan  chan struct{}
-	messages  []string
-	persisted *os.File
-	inMemory  bool
+	topic    string
+	logger   *log.Logger
+	handler  func(messaging.ImageRequest) error
+	mu       sync.RWMutex
+	stopChan chan struct{}
+	messages []string
+	running  bool
+	msgChan  chan string
 }
 
 // NewClient creates a new queue client
 func NewClient(config messaging.Config, logger *log.Logger) messaging.Client {
-	// Default to in-memory if no broker specified
-	inMemory := config.Broker == "" || config.Broker == ":memory:"
-	queuePath := "queue.json"
-
-	// Use specified path if provided and not in-memory
-	if !inMemory && config.Broker != "" {
-		queuePath = config.Broker
-	}
-
 	return &QueueClient{
-		path:     queuePath,
 		topic:    config.Topic,
 		logger:   logger,
 		stopChan: make(chan struct{}),
-		inMemory: inMemory,
+		messages: make([]string, 0, 100), // Pre-allocate space for messages
+		msgChan:  make(chan string, 100), // Buffered channel for message processing
 	}
 }
 
@@ -50,157 +38,122 @@ func (q *QueueClient) Connect(ctx context.Context) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	// Initialize empty message queue
-	q.messages = make([]string, 0)
-
-	// Skip file operations for in-memory queue
-	if q.inMemory {
-		q.logger.Printf("Using in-memory queue")
-		return nil
+	if q.running {
+		return fmt.Errorf("queue already connected")
 	}
 
-	// Create directory if needed
-	dir := filepath.Dir(q.path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("failed to create directory: %v", err)
-	}
-
-	// Open persistence file
-	file, err := os.OpenFile(q.path, os.O_RDWR|os.O_CREATE, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to open queue file: %v", err)
-	}
-	q.persisted = file
-
-	// Load existing messages
-	decoder := json.NewDecoder(file)
-	var messages []string
-	if err := decoder.Decode(&messages); err != nil && err.Error() != "EOF" {
-		file.Close()
-		return fmt.Errorf("failed to load messages: %v", err)
-	}
-	if messages != nil {
-		q.messages = messages
-		q.logger.Printf("Loaded %d messages from %s", len(messages), q.path)
-	}
-
-	q.logger.Printf("Using file-backed queue at %s", q.path)
+	q.running = true
+	q.logger.Printf("Using in-memory queue")
 	return nil
 }
 
 func (q *QueueClient) Disconnect() {
+	q.mu.Lock()
+	if !q.running {
+		q.mu.Unlock()
+		return
+	}
+	q.running = false
 	close(q.stopChan)
-	if q.persisted != nil {
-		q.persisted.Close()
-	}
-}
-
-func (q *QueueClient) persistMessages() error {
-	// Skip persistence for in-memory queue
-	if q.inMemory {
-		return nil
-	}
-
-	// Skip if no file handle
-	if q.persisted == nil {
-		return fmt.Errorf("no persistence file available")
-	}
-
-	q.mu.RLock()
-	messages := make([]string, len(q.messages))
-	copy(messages, q.messages)
-	q.mu.RUnlock()
-
-	// Truncate and write
-	if err := q.persisted.Truncate(0); err != nil {
-		return fmt.Errorf("failed to truncate file: %v", err)
-	}
-	if _, err := q.persisted.Seek(0, 0); err != nil {
-		return fmt.Errorf("failed to seek: %v", err)
-	}
-
-	encoder := json.NewEncoder(q.persisted)
-	if err := encoder.Encode(messages); err != nil {
-		return fmt.Errorf("failed to persist messages: %v", err)
-	}
-
-	q.logger.Printf("Persisted %d messages", len(messages))
-	return nil
+	close(q.msgChan)
+	q.mu.Unlock()
 }
 
 func (q *QueueClient) Publish(image string) error {
+	q.mu.RLock()
+	if !q.running {
+		q.mu.RUnlock()
+		return fmt.Errorf("queue not connected")
+	}
+	q.mu.RUnlock()
+
 	payload, err := json.Marshal(messaging.ImageRequest{Image: image})
 	if err != nil {
 		return fmt.Errorf("failed to marshal image request: %v", err)
 	}
 
-	q.mu.Lock()
-	q.messages = append(q.messages, string(payload))
-	q.mu.Unlock()
-
-	// Persist in background
-	if !q.inMemory {
-		go func() {
-			if err := q.persistMessages(); err != nil {
-				q.logger.Printf("Failed to persist messages: %v", err)
-			}
-		}()
+	// Send directly to processing channel
+	select {
+	case q.msgChan <- string(payload):
+		return nil
+	case <-q.stopChan:
+		return fmt.Errorf("queue stopped")
+	default:
+		// Channel full, use backup slice
+		q.mu.Lock()
+		q.messages = append(q.messages, string(payload))
+		q.mu.Unlock()
+		return nil
 	}
-
-	return nil
 }
 
 func (q *QueueClient) Subscribe(handler func(messaging.ImageRequest) error) error {
+	q.mu.Lock()
+	if !q.running {
+		q.mu.Unlock()
+		return fmt.Errorf("queue not connected")
+	}
+	if q.handler != nil {
+		q.mu.Unlock()
+		return fmt.Errorf("already subscribed")
+	}
 	q.handler = handler
+	q.mu.Unlock()
 
 	// Process messages in background
 	go func() {
-		ticker := time.NewTicker(100 * time.Millisecond)
+		ticker := time.NewTicker(10 * time.Millisecond) // Faster ticker for backup slice
 		defer ticker.Stop()
 
 		for {
+			q.mu.RLock()
+			if !q.running {
+				q.mu.RUnlock()
+				return
+			}
+			q.mu.RUnlock()
+
 			select {
 			case <-q.stopChan:
 				return
+			case payload := <-q.msgChan:
+				// Process message from channel
+				q.processMessage(payload)
 			case <-ticker.C:
-				// Get next message
+				// Check backup slice
 				q.mu.Lock()
-				if len(q.messages) == 0 {
+				if len(q.messages) > 0 {
+					payload := q.messages[0]
+					q.messages = q.messages[1:]
 					q.mu.Unlock()
-					continue
-				}
-
-				// Process first message
-				payload := q.messages[0]
-				q.messages = q.messages[1:]
-				q.mu.Unlock()
-
-				// Parse and handle
-				var req messaging.ImageRequest
-				if err := json.Unmarshal([]byte(payload), &req); err != nil {
-					q.logger.Printf("Failed to unmarshal message: %v", err)
-					continue
-				}
-
-				if err := q.handler(req); err != nil {
-					q.logger.Printf("Handler error: %v", err)
-					// Re-queue on error
-					q.mu.Lock()
-					q.messages = append(q.messages, payload)
+					q.processMessage(payload)
+				} else {
 					q.mu.Unlock()
-				}
-
-				// Persist changes
-				if !q.inMemory {
-					go func() {
-						if err := q.persistMessages(); err != nil {
-							q.logger.Printf("Failed to persist messages: %v", err)
-						}
-					}()
 				}
 			}
 		}
 	}()
 
 	return nil
+}
+
+func (q *QueueClient) processMessage(payload string) {
+	var req messaging.ImageRequest
+	if err := json.Unmarshal([]byte(payload), &req); err != nil {
+		q.logger.Printf("Failed to unmarshal message: %v", err)
+		return
+	}
+
+	if err := q.handler(req); err != nil {
+		q.logger.Printf("Handler error: %v", err)
+		// Re-queue on error using channel first
+		select {
+		case q.msgChan <- payload:
+		default:
+			// Channel full, use backup slice
+			q.mu.Lock()
+			q.messages = append(q.messages, payload)
+			q.mu.Unlock()
+		}
+	}
 }
