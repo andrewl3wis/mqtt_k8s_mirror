@@ -23,15 +23,26 @@ type QueueClient struct {
 	stopChan  chan struct{}
 	messages  []string
 	persisted *os.File
+	inMemory  bool
 }
 
 // NewClient creates a new queue client
 func NewClient(config messaging.Config, logger *log.Logger) messaging.Client {
+	// Default to in-memory if no broker specified
+	inMemory := config.Broker == "" || config.Broker == ":memory:"
+	queuePath := "queue.json"
+
+	// Use specified path if provided and not in-memory
+	if !inMemory && config.Broker != "" {
+		queuePath = config.Broker
+	}
+
 	return &QueueClient{
-		path:     config.Broker,
+		path:     queuePath,
 		topic:    config.Topic,
 		logger:   logger,
 		stopChan: make(chan struct{}),
+		inMemory: inMemory,
 	}
 }
 
@@ -39,30 +50,41 @@ func (q *QueueClient) Connect(ctx context.Context) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	// Create directory if needed
-	if q.path != ":memory:" {
-		dir := filepath.Dir(q.path)
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return fmt.Errorf("failed to create directory: %v", err)
-		}
+	// Initialize empty message queue
+	q.messages = make([]string, 0)
 
-		// Open persistence file
-		file, err := os.OpenFile(q.path, os.O_RDWR|os.O_CREATE, 0644)
-		if err != nil {
-			return fmt.Errorf("failed to open queue file: %v", err)
-		}
-		q.persisted = file
-
-		// Load existing messages
-		decoder := json.NewDecoder(file)
-		var messages []string
-		if err := decoder.Decode(&messages); err != nil && err.Error() != "EOF" {
-			file.Close()
-			return fmt.Errorf("failed to load messages: %v", err)
-		}
-		q.messages = messages
+	// Skip file operations for in-memory queue
+	if q.inMemory {
+		q.logger.Printf("Using in-memory queue")
+		return nil
 	}
 
+	// Create directory if needed
+	dir := filepath.Dir(q.path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create directory: %v", err)
+	}
+
+	// Open persistence file
+	file, err := os.OpenFile(q.path, os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open queue file: %v", err)
+	}
+	q.persisted = file
+
+	// Load existing messages
+	decoder := json.NewDecoder(file)
+	var messages []string
+	if err := decoder.Decode(&messages); err != nil && err.Error() != "EOF" {
+		file.Close()
+		return fmt.Errorf("failed to load messages: %v", err)
+	}
+	if messages != nil {
+		q.messages = messages
+		q.logger.Printf("Loaded %d messages from %s", len(messages), q.path)
+	}
+
+	q.logger.Printf("Using file-backed queue at %s", q.path)
 	return nil
 }
 
@@ -74,8 +96,14 @@ func (q *QueueClient) Disconnect() {
 }
 
 func (q *QueueClient) persistMessages() error {
-	if q.persisted == nil {
+	// Skip persistence for in-memory queue
+	if q.inMemory {
 		return nil
+	}
+
+	// Skip if no file handle
+	if q.persisted == nil {
+		return fmt.Errorf("no persistence file available")
 	}
 
 	q.mu.RLock()
@@ -96,6 +124,7 @@ func (q *QueueClient) persistMessages() error {
 		return fmt.Errorf("failed to persist messages: %v", err)
 	}
 
+	q.logger.Printf("Persisted %d messages", len(messages))
 	return nil
 }
 
@@ -110,11 +139,13 @@ func (q *QueueClient) Publish(image string) error {
 	q.mu.Unlock()
 
 	// Persist in background
-	go func() {
-		if err := q.persistMessages(); err != nil {
-			q.logger.Printf("Failed to persist messages: %v", err)
-		}
-	}()
+	if !q.inMemory {
+		go func() {
+			if err := q.persistMessages(); err != nil {
+				q.logger.Printf("Failed to persist messages: %v", err)
+			}
+		}()
+	}
 
 	return nil
 }
@@ -160,11 +191,13 @@ func (q *QueueClient) Subscribe(handler func(messaging.ImageRequest) error) erro
 				}
 
 				// Persist changes
-				go func() {
-					if err := q.persistMessages(); err != nil {
-						q.logger.Printf("Failed to persist messages: %v", err)
-					}
-				}()
+				if !q.inMemory {
+					go func() {
+						if err := q.persistMessages(); err != nil {
+							q.logger.Printf("Failed to persist messages: %v", err)
+						}
+					}()
+				}
 			}
 		}
 	}()

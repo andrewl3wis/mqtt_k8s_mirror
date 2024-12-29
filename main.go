@@ -193,19 +193,39 @@ func main() {
 func parseFlags() Config {
 	config := Config{}
 
-	flag.BoolVar(&config.EnableWebhook, "webhook", false, "Enable Kubernetes webhook monitoring")
-	flag.BoolVar(&config.EnableMirror, "mirror", false, "Enable message-based image mirroring")
-	flag.StringVar(&config.MessagingType, "messaging-type", "mqtt", "Messaging system type (queue, mqtt, postgres)")
-	flag.StringVar(&config.MessagingBroker, "broker", "tcp://localhost:1883", "Messaging broker address")
-	flag.StringVar(&config.MessagingTopic, "topic", "image/download", "Topic for image download requests")
-	flag.StringVar(&config.MessagingUsername, "username", "", "Messaging username (optional)")
-	flag.StringVar(&config.MessagingPassword, "password", "", "Messaging password (optional)")
-	flag.StringVar(&config.LocalRegistry, "local-registry", "localhost:5000", "Local Docker registry address")
-	flag.StringVar(&config.WebhookPort, "webhook-port", "8443", "Port to listen for webhook calls")
-	flag.BoolVar(&config.InsecureRegistries, "insecure-registries", false, "Allow connections to insecure registries (HTTP)")
-	flag.StringVar(&config.TLSCertPath, "tls-cert", "server.crt", "Path to TLS certificate file")
-	flag.StringVar(&config.TLSKeyPath, "tls-key", "server.key", "Path to TLS key file")
-	flag.StringVar(&config.LogFile, "log-file", "", "Path to log file (if empty, logs to stdout)")
+	flag.Usage = func() {
+		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s [options]\n\nOptions:\n", os.Args[0])
+		flag.PrintDefaults()
+		fmt.Fprintf(flag.CommandLine.Output(), "\nExamples:\n")
+		fmt.Fprintf(flag.CommandLine.Output(), "  Local queue:\n")
+		fmt.Fprintf(flag.CommandLine.Output(), "    %s -webhook -mirror -messaging-type queue\n", os.Args[0])
+		fmt.Fprintf(flag.CommandLine.Output(), "  MQTT broker:\n")
+		fmt.Fprintf(flag.CommandLine.Output(), "    %s -webhook -mirror -messaging-type mqtt -broker tcp://localhost:1883\n", os.Args[0])
+		fmt.Fprintf(flag.CommandLine.Output(), "  PostgreSQL:\n")
+		fmt.Fprintf(flag.CommandLine.Output(), "    %s -webhook -mirror -messaging-type postgres -broker localhost:5432 -username user -password pass\n", os.Args[0])
+	}
+
+	flag.BoolVar(&config.EnableWebhook, "webhook", false, "Enable webhook server to detect pod creation events")
+	flag.BoolVar(&config.EnableMirror, "mirror", false, "Enable image mirroring service to process download requests")
+	flag.StringVar(&config.MessagingType, "messaging-type", "mqtt",
+		"Messaging backend type:\n"+
+			"  queue    - Local file-backed queue for single instance\n"+
+			"  mqtt     - MQTT broker for distributed operation\n"+
+			"  postgres - PostgreSQL for distributed operation")
+	flag.StringVar(&config.MessagingBroker, "broker", "tcp://localhost:1883",
+		"Messaging broker address:\n"+
+			"  queue    - Path to queue file (optional)\n"+
+			"  mqtt     - Broker URL (e.g., tcp://localhost:1883)\n"+
+			"  postgres - Database host:port")
+	flag.StringVar(&config.MessagingTopic, "topic", "image/download", "Topic/channel name for messaging")
+	flag.StringVar(&config.MessagingUsername, "username", "", "Username for MQTT/PostgreSQL authentication")
+	flag.StringVar(&config.MessagingPassword, "password", "", "Password for MQTT/PostgreSQL authentication")
+	flag.StringVar(&config.LocalRegistry, "local-registry", "localhost:5000", "Address of local Docker registry to mirror images to")
+	flag.StringVar(&config.WebhookPort, "webhook-port", "8443", "Port for webhook server to listen on")
+	flag.BoolVar(&config.InsecureRegistries, "insecure-registries", false, "Allow pulling from insecure (HTTP) registries")
+	flag.StringVar(&config.TLSCertPath, "tls-cert", "server.crt", "Path to TLS certificate for webhook server")
+	flag.StringVar(&config.TLSKeyPath, "tls-key", "server.key", "Path to TLS private key for webhook server")
+	flag.StringVar(&config.LogFile, "log-file", "", "Log file path (defaults to stdout)")
 
 	flag.Parse()
 

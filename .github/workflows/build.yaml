@@ -33,19 +33,6 @@ jobs:
         image: registry:2
         ports:
           - 5000:5000
-      postgres:
-        image: postgres:14-alpine
-        env:
-          POSTGRES_USER: test
-          POSTGRES_PASSWORD: test
-          POSTGRES_DB: test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     strategy:
       matrix:
         messaging: [queue, mqtt, postgres]
@@ -59,6 +46,10 @@ jobs:
       - name: Make binary executable
         run: chmod +x kube-mqtt-mirror
 
+      - name: Setup Queue Directory
+        if: matrix.messaging == 'queue'
+        run: mkdir -p queue
+
       - name: Setup MQTT
         if: matrix.messaging == 'mqtt'
         run: |
@@ -68,9 +59,33 @@ jobs:
           echo "allow_anonymous true" | sudo tee -a /etc/mosquitto/conf.d/test.conf
           sudo systemctl start mosquitto
 
-      - name: Setup Postgres Table
+      - name: Setup Postgres
         if: matrix.messaging == 'postgres'
         run: |
+          # Start PostgreSQL
+          docker run -d --name postgres \
+            -e POSTGRES_USER=test \
+            -e POSTGRES_PASSWORD=test \
+            -e POSTGRES_DB=test \
+            -p 5432:5432 \
+            postgres:14-alpine
+
+          # Wait for PostgreSQL to be ready
+          timeout=30
+          for i in $(seq 1 $timeout); do
+            if docker exec postgres pg_isready -U test > /dev/null 2>&1; then
+              echo "PostgreSQL is ready"
+              break
+            fi
+            if [ $i -eq $timeout ]; then
+              echo "PostgreSQL failed to start"
+              exit 1
+            fi
+            echo "Waiting for PostgreSQL ($i/$timeout)..."
+            sleep 1
+          done
+
+          # Create required table
           PGPASSWORD=test psql -h localhost -U test -d test -c "
             CREATE TABLE IF NOT EXISTS messages (
               id SERIAL PRIMARY KEY,
@@ -92,12 +107,15 @@ jobs:
 
       - name: Start Program
         run: |
-          BROKER_ADDR=""
-          EXTRA_ARGS=""
+          # Configure broker based on messaging type
           case "${{ matrix.messaging }}" in
-            "sqlite") BROKER_ADDR="test.db" ;;
-            "mqtt") BROKER_ADDR="tcp://localhost:1883" ;;
-            "postgres") 
+            "queue")
+              BROKER_ADDR="queue/messages.json"
+              ;;
+            "mqtt")
+              BROKER_ADDR="tcp://localhost:1883"
+              ;;
+            "postgres")
               BROKER_ADDR="localhost:5432"
               EXTRA_ARGS="-username test -password test"
               ;;
@@ -184,16 +202,22 @@ jobs:
           # Stop program
           pkill kube-mqtt-mirror || true
 
-          # Cleanup backend
+          # Cleanup messaging backend
           case "${{ matrix.messaging }}" in
-            "sqlite")
-              rm -f test.db
+            "queue")
+              rm -rf queue/
               ;;
             "mqtt")
               sudo systemctl stop mosquitto
               sudo rm -f /etc/mosquitto/conf.d/test.conf
               ;;
+            "postgres")
+              docker stop postgres
+              docker rm -f postgres
+              ;;
           esac
 
-          # Cleanup files
+          # Cleanup common files and containers
           rm -f server.key server.crt kube-mqtt-mirror.log
+          docker stop registry || true
+          docker rm -f registry || true
