@@ -88,40 +88,17 @@ jobs:
       - name: Setup MQTT (if needed)
         if: matrix.messaging == 'mqtt'
         run: |
-          # Install Mosquitto and client tools
+          # Install Mosquitto
           sudo apt-get update
-          sudo apt-get install -y mosquitto mosquitto-clients
+          sudo apt-get install -y mosquitto
           
           # Configure Mosquitto for testing
-          cat > mosquitto.conf <<EOF
-          listener 1883
-          allow_anonymous false
-          password_file /etc/mosquitto/passwd
-          EOF
-          sudo mv mosquitto.conf /etc/mosquitto/conf.d/test.conf
-          
-          # Create password file
-          sudo mosquitto_passwd -c /etc/mosquitto/passwd test
-          echo "test" | sudo mosquitto_passwd -b /etc/mosquitto/passwd test test
+          echo "listener 1883" | sudo tee /etc/mosquitto/conf.d/test.conf
+          echo "allow_anonymous true" | sudo tee -a /etc/mosquitto/conf.d/test.conf
           
           # Start Mosquitto
-          sudo systemctl restart mosquitto
-          
-          # Wait for MQTT broker to be ready
-          timeout=30
-          for i in $(seq 1 $timeout); do
-            if timeout 1 mosquitto_sub -t test -h localhost -p 1883 -u test -P test -C 1; then
-              echo "MQTT broker is ready"
-              break
-            fi
-            if [ $i -eq $timeout ]; then
-              echo "MQTT broker failed to start"
-              sudo systemctl status mosquitto
-              exit 1
-            fi
-            echo "Waiting for MQTT broker ($i/$timeout)..."
-            sleep 1
-          done
+          sudo systemctl start mosquitto
+          echo "MQTT broker started on port 1883"
           echo "MQTT broker started on port 1883"
 
       - name: Setup Postgres (if needed)
@@ -170,21 +147,17 @@ jobs:
 
           # Configure messaging settings based on type
           BROKER_ADDR=""
-          USERNAME=""
-          PASSWORD=""
+          EXTRA_ARGS=""
           case "${{ matrix.messaging }}" in
             "sqlite")
               BROKER_ADDR="test.db"
               ;;
             "mqtt")
               BROKER_ADDR="tcp://localhost:1883"
-              USERNAME="test"
-              PASSWORD="test"
               ;;
             "postgres")
-              BROKER_ADDR="postgres://test:test@localhost:5432/test?sslmode=disable"
-              USERNAME="test"
-              PASSWORD="test"
+              BROKER_ADDR="localhost:5432"
+              EXTRA_ARGS="-username test -password test"
               ;;
           esac
 
@@ -194,8 +167,7 @@ jobs:
             -mirror \
             -messaging-type ${{ matrix.messaging }} \
             -broker "$BROKER_ADDR" \
-            -username "$USERNAME" \
-            -password "$PASSWORD" \
+            $EXTRA_ARGS \
             -webhook-port 8443 \
             -local-registry localhost:5000 \
             -insecure-registries \
