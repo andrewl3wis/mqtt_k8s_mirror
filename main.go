@@ -26,7 +26,7 @@ import (
 	"kube-mqtt-mirror/pkg/messaging"
 	"kube-mqtt-mirror/pkg/messaging/mqtt"
 	"kube-mqtt-mirror/pkg/messaging/postgres"
-	"kube-mqtt-mirror/pkg/messaging/sqlite"
+	"kube-mqtt-mirror/pkg/messaging/queue"
 )
 
 // Config holds all configuration parameters
@@ -44,6 +44,7 @@ type Config struct {
 	TLSCertPath        string
 	TLSKeyPath         string
 	LogFile            string
+	MultiInstance      bool
 }
 
 // AppContext holds application-wide context and resources
@@ -194,8 +195,8 @@ func parseFlags() Config {
 
 	flag.BoolVar(&config.EnableWebhook, "webhook", false, "Enable Kubernetes webhook monitoring")
 	flag.BoolVar(&config.EnableMirror, "mirror", false, "Enable message-based image mirroring")
-	flag.StringVar(&config.MessagingType, "messaging-type", "sqlite", "Messaging system type (sqlite, mqtt, postgres)")
-	flag.StringVar(&config.MessagingBroker, "broker", ":memory:", "Messaging broker address (use :memory: for in-memory SQLite)")
+	flag.StringVar(&config.MessagingType, "messaging-type", "mqtt", "Messaging system type (queue, mqtt, postgres)")
+	flag.StringVar(&config.MessagingBroker, "broker", "tcp://localhost:1883", "Messaging broker address")
 	flag.StringVar(&config.MessagingTopic, "topic", "image/download", "Topic for image download requests")
 	flag.StringVar(&config.MessagingUsername, "username", "", "Messaging username (optional)")
 	flag.StringVar(&config.MessagingPassword, "password", "", "Messaging password (optional)")
@@ -271,30 +272,25 @@ func (app *AppContext) shutdown() {
 }
 
 func (app *AppContext) startMessaging() error {
-	// Create messaging client based on type
+	// Create messaging client
 	var client messaging.Client
+	config := messaging.Config{
+		Broker:   app.config.MessagingBroker,
+		Topic:    app.config.MessagingTopic,
+		Username: app.config.MessagingUsername,
+		Password: app.config.MessagingPassword,
+	}
+
+	// Create messaging client based on type
 	switch app.config.MessagingType {
-	case "sqlite":
-		client = sqlite.NewClient(messaging.Config{
-			Broker: app.config.MessagingBroker,
-			Topic:  app.config.MessagingTopic,
-		}, app.logger)
+	case "queue":
+		client = queue.NewClient(config, app.logger)
 	case "mqtt":
-		client = mqtt.NewClient(messaging.Config{
-			Broker:   app.config.MessagingBroker,
-			Topic:    app.config.MessagingTopic,
-			Username: app.config.MessagingUsername,
-			Password: app.config.MessagingPassword,
-		}, app.logger)
+		client = mqtt.NewClient(config, app.logger)
 	case "postgres":
-		client = postgres.NewClient(messaging.Config{
-			Broker:   app.config.MessagingBroker,
-			Topic:    app.config.MessagingTopic,
-			Username: app.config.MessagingUsername,
-			Password: app.config.MessagingPassword,
-		}, app.logger)
+		client = postgres.NewClient(config, app.logger)
 	default:
-		return fmt.Errorf("unsupported messaging type: %s", app.config.MessagingType)
+		return fmt.Errorf("unsupported messaging type: %s (must be queue, mqtt, or postgres)", app.config.MessagingType)
 	}
 
 	app.msgClient = client
