@@ -9,6 +9,9 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"sync"
+	"time"
 
 	"kube-mqtt-mirror/pkg/messaging"
 
@@ -28,18 +31,76 @@ type Server struct {
 	keyFile   string
 	port      string
 	enableTLS bool
+	certMu    sync.RWMutex
+	tlsConfig *tls.Config
+}
+
+// reloadCertificate reloads the TLS certificate and key from disk
+func (s *Server) reloadCertificate() error {
+	cert, err := tls.LoadX509KeyPair(s.certFile, s.keyFile)
+	if err != nil {
+		return fmt.Errorf("failed to load TLS certificate: %v", err)
+	}
+
+	s.certMu.Lock()
+	s.tlsConfig.Certificates = []tls.Certificate{cert}
+	s.certMu.Unlock()
+
+	s.logger.Printf("TLS certificate reloaded from %s", s.certFile)
+	return nil
+}
+
+// watchCertificate watches for changes to the certificate files and reloads them
+func (s *Server) watchCertificate(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	var lastModTime time.Time
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			stat, err := os.Stat(s.certFile)
+			if err != nil {
+				s.logger.Printf("Failed to stat certificate file: %v", err)
+				continue
+			}
+
+			if stat.ModTime().After(lastModTime) {
+				if err := s.reloadCertificate(); err != nil {
+					s.logger.Printf("Failed to reload certificate: %v", err)
+					continue
+				}
+				lastModTime = stat.ModTime()
+			}
+		}
+	}
 }
 
 // NewServer creates a new webhook server
 func NewServer(logger *log.Logger, msgClient messaging.Client, port string, certFile, keyFile string) *Server {
-	return &Server{
+	s := &Server{
 		logger:    logger,
 		msgClient: msgClient,
 		port:      port,
 		certFile:  certFile,
 		keyFile:   keyFile,
 		enableTLS: certFile != "" && keyFile != "",
+		certMu:    sync.RWMutex{},
 	}
+
+	if s.enableTLS {
+		s.tlsConfig = &tls.Config{
+			GetCertificate: func(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
+				s.certMu.RLock()
+				defer s.certMu.RUnlock()
+				return &s.tlsConfig.Certificates[0], nil
+			},
+		}
+	}
+
+	return s
 }
 
 // Start starts the webhook server
@@ -73,18 +134,18 @@ func (s *Server) Start(ctx context.Context) error {
 		return s.server.Serve(listener)
 	}
 
-	// Load TLS certificate
-	cert, err := tls.LoadX509KeyPair(s.certFile, s.keyFile)
-	if err != nil {
-		return fmt.Errorf("failed to load TLS certificate: %v", err)
+	// Load initial TLS certificate
+	if err := s.reloadCertificate(); err != nil {
+		return err
 	}
 
 	s.logger.Printf("Starting webhook server with TLS on 0.0.0.0:%s", port)
 
+	// Start certificate watcher
+	go s.watchCertificate(ctx)
+
 	// Wrap listener with TLS
-	tlsListener := tls.NewListener(listener, &tls.Config{
-		Certificates: []tls.Certificate{cert},
-	})
+	tlsListener := tls.NewListener(listener, s.tlsConfig)
 
 	return s.server.Serve(tlsListener)
 }

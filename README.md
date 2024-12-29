@@ -84,17 +84,19 @@ kube-mqtt-mirror -mirror -messaging-type postgres \
 
 ### TLS Configuration
 
-TLS is automatically enabled when certificate and key files are provided:
+TLS is automatically enabled when certificate and key files are provided. The server supports automatic certificate reloading, making it compatible with Let's Encrypt certificate renewals:
 
 ```bash
-# Direct access with TLS
+# Direct access with TLS (supports Let's Encrypt auto-renewal)
 kube-mqtt-mirror -webhook -mirror -messaging-type queue \
-  -tls-cert server.crt \
-  -tls-key server.key
+  -tls-cert /etc/letsencrypt/live/example.com/fullchain.pem \
+  -tls-key /etc/letsencrypt/live/example.com/privkey.pem
 
 # Behind reverse proxy (no TLS)
 kube-mqtt-mirror -webhook -mirror -messaging-type queue
 ```
+
+The server automatically detects and reloads certificates when they are renewed by Let's Encrypt or any other certificate manager, without requiring a restart.
 
 ## Command Line Options
 
