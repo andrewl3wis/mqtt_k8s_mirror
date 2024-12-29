@@ -266,19 +266,53 @@ jobs:
             exit 1
           fi
 
-          # Create test pod
-          kubectl apply -f - <<EOF
-          apiVersion: v1
-          kind: Pod
-          metadata:
-            name: webhook-test-pod
-            annotations:
-              webhook: "true"
-          spec:
-            containers:
-              - name: nginx
-                image: nginx
-          EOF
+          # Test concurrent pod creation with different images
+          echo "Testing concurrent pod creation..."
+          IMAGES=("nginx:alpine" "busybox:latest" "redis:alpine" "memcached:alpine" "postgres:alpine")
+          for img in "${IMAGES[@]}"; do
+            kubectl create deployment "test-pod-${img/:/-}" --image="$img"
+            kubectl patch deployment "test-pod-${img/:/-}" --type=json -p='[{"op": "add", "path": "/spec/template/metadata/annotations", "value": {"webhook": "true"}}]' &
+          done
+
+          # Wait for all images to be processed
+          echo "Waiting for concurrent image copies..."
+          timeout=120
+          all_copied=false
+          for i in $(seq 1 $timeout); do
+            copied_count=0
+            for img in "${IMAGES[@]}"; do
+              if grep -q "Successfully downloaded image: $img" kube-mqtt-mirror.log; then
+                ((copied_count++))
+              fi
+            done
+            if [ "$copied_count" -eq "${#IMAGES[@]}" ]; then
+              all_copied=true
+              break
+            fi
+            echo "Waiting for concurrent copies ($i/$timeout)... $copied_count/${#IMAGES[@]} completed"
+            sleep 1
+          done
+
+          if [ "$all_copied" != "true" ]; then
+            echo "Concurrent image copies failed"
+            echo "Log contents:"
+            cat kube-mqtt-mirror.log
+            exit 1
+          fi
+
+          # Wait for all pods to be ready
+          for img in "${IMAGES[@]}"; do
+            if ! kubectl wait --for=condition=ready deployment/test-pod-${img/:/-} --timeout=60s; then
+              echo "Deployment failed for $img"
+              kubectl describe deployment test-pod-${img/:/-}
+              exit 1
+            fi
+          done
+
+          # Cleanup test deployments
+          for img in "${IMAGES[@]}"; do
+            kubectl delete deployment test-pod-${img/:/-} || true
+          done
 
           # Wait for image copy to complete
           echo "Waiting for image copy to complete..."
