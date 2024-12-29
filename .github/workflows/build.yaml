@@ -135,7 +135,7 @@ jobs:
             -log-file kube-mqtt-mirror.log &
           
           timeout=30
-          while ! grep -q "Subscribed to topic: image/download" kube-mqtt-mirror.log; do
+          while ! grep -q "Mirror service started" kube-mqtt-mirror.log; do
             if [ $timeout -le 0 ]; then
               echo "Program failed to start"
               cat kube-mqtt-mirror.log
