@@ -1,11 +1,9 @@
-# Dependency stage
-FROM golang:1.23.4-bookworm AS deps
+FROM golang:1.23.4-bookworm AS builder
 
-# Cache apt packages
+# Install build dependencies
 RUN rm -f /etc/apt/apt.conf.d/docker-clean && \
     echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache
 
-# Install build dependencies with cache
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y \
@@ -16,36 +14,18 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     file \
     gcc \
     libc6-dev \
-    musl-dev \
-    libgpgme11-dev \
-    libassuan-dev \
-    libgpg-error-dev \
-    libassuan-dev \
-    libgpgme11-dev \
-    libgpg-error-dev \
-    libassuan-dev \
-    libgpgme-dev \
-    libgpg-error-dev \
-    libassuan-dev
+    musl-dev
 
 # Set up workspace
-WORKDIR /go/src/app
-COPY go.mod go.sum ./
-ENV GOMODCACHE=/tmp/mod
-RUN go mod download
+WORKDIR /app
 
-# Build stage
-FROM deps AS builder
-WORKDIR /go/src/app
+# Copy binary from GoReleaser
+COPY kube-mqtt-mirror /app/kube-mqtt-mirror
 
-COPY . .
+# Use distroless as minimal base image
+FROM gcr.io/distroless/base-debian12
 
-# Build the binary with detailed logging
-ENV GOTOOLCHAIN=local
-ENV CGO_ENABLED=1
-ENV GOARCH=amd64
-ENV GO111MODULE=on
-RUN go build -v -tags musl,netgo,osusergo,containers_image_openpgp,exclude_graphdriver_devicemapper,exclude_graphdriver_btrfs,containers_image_ostree_stub,containers_image_no_pkcs11,nosqlite -ldflags='-linkmode external -extldflags "-static -L/usr/lib/x86_64-linux-gnu -lgpgme -lassuan -lgpg-error"' -o kube-mqtt-mirror-amd64 && \
-    echo "=== Binary Info ===" && \
-    file kube-mqtt-mirror-amd64 && \
-    ldd kube-mqtt-mirror-amd64
+WORKDIR /app
+COPY --from=builder /app/kube-mqtt-mirror /app/kube-mqtt-mirror
+
+ENTRYPOINT ["/app/kube-mqtt-mirror"]
