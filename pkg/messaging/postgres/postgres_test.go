@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -92,10 +93,13 @@ func TestPostgresClient(t *testing.T) {
 			WithArgs("test/images", `{"image":"redis:alpine"}`).
 			WillReturnResult(sqlmock.NewResult(0, 1))
 
-		// Track received messages
+		// Track received messages safely across goroutines
 		received := make([]string, 0)
+		var receivedMu sync.Mutex
 		handler := func(req messaging.ImageRequest) error {
+			receivedMu.Lock()
 			received = append(received, req.Image)
+			receivedMu.Unlock()
 			return nil
 		}
 
@@ -109,6 +113,7 @@ func TestPostgresClient(t *testing.T) {
 
 		// Verify received messages
 		expected := []string{"nginx:latest", "redis:alpine"}
+		receivedMu.Lock()
 		if len(received) != len(expected) {
 			t.Errorf("Got %d messages, want %d", len(received), len(expected))
 		}
@@ -117,6 +122,7 @@ func TestPostgresClient(t *testing.T) {
 				t.Errorf("Message %d: got %q, want %q", i, msg, expected[i])
 			}
 		}
+		receivedMu.Unlock()
 
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Errorf("Unfulfilled expectations: %v", err)
